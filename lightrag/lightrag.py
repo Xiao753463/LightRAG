@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import json
 import os
 import csv
 import warnings
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Any, AsyncIterator, Callable, Iterator, cast, final, Literal
+from typing import Any, AsyncIterator, Callable, Iterator, Optional, Union, cast, final, Literal
 import pandas as pd
 
 
@@ -34,6 +35,8 @@ from .operate import (
     chunking_by_token_size,
     extract_entities,
     kg_query,
+    kg_query_plus,
+    kg_query_plus_with_function_call,
     mix_kg_vector_query,
     naive_query,
     query_with_keywords,
@@ -211,7 +214,8 @@ class LightRAG:
     llm_model_name: str = field(default="gpt-4o-mini")
     """Name of the LLM model used for generating responses."""
 
-    llm_model_max_token_size: int = field(default=int(os.getenv("MAX_TOKENS", 32768)))
+    llm_model_max_token_size: int = field(
+        default=int(os.getenv("MAX_TOKENS", 32768)))
     """Maximum number of tokens allowed per LLM response."""
 
     llm_model_max_async: int = field(default=int(os.getenv("MAX_ASYNC", 4)))
@@ -238,7 +242,8 @@ class LightRAG:
     # Extensions
     # ---
 
-    max_parallel_insert: int = field(default=int(os.getenv("MAX_PARALLEL_INSERT", 2)))
+    max_parallel_insert: int = field(
+        default=int(os.getenv("MAX_PARALLEL_INSERT", 2)))
     """Maximum number of parallel insert operations."""
 
     addon_params: dict[str, Any] = field(
@@ -269,7 +274,8 @@ class LightRAG:
         default=float(os.getenv("COSINE_THRESHOLD", 0.2))
     )
 
-    _storages_status: StoragesStatus = field(default=StoragesStatus.NOT_CREATED)
+    _storages_status: StoragesStatus = field(
+        default=StoragesStatus.NOT_CREATED)
 
     def __post_init__(self):
         from lightrag.kg.shared_storage import (
@@ -324,7 +330,8 @@ class LightRAG:
 
         # Show config
         global_config = asdict(self)
-        _print_config = ",\n  ".join([f"{k} = {v}" for k, v in global_config.items()])
+        _print_config = ",\n  ".join(
+            [f"{k} = {v}" for k, v in global_config.items()])
         logger.debug(f"LightRAG init with param:\n  {_print_config}\n")
 
         # Init LLM
@@ -353,7 +360,8 @@ class LightRAG:
         )
 
         # Initialize document status storage
-        self.doc_status_storage_cls = self._get_storage_class(self.doc_status_storage)
+        self.doc_status_storage_cls = self._get_storage_class(
+            self.doc_status_storage)
 
         self.llm_response_cache: BaseKVStorage = self.key_string_value_json_storage_cls(  # type: ignore
             namespace=make_namespace(
@@ -407,7 +415,8 @@ class LightRAG:
 
         # Initialize document status storage
         self.doc_status: DocStatusStorage = self.doc_status_storage_cls(
-            namespace=make_namespace(self.namespace_prefix, NameSpace.DOC_STATUS),
+            namespace=make_namespace(
+                self.namespace_prefix, NameSpace.DOC_STATUS),
             global_config=global_config,
             embedding_func=None,
         )
@@ -426,11 +435,13 @@ class LightRAG:
         self._storages_status = StoragesStatus.CREATED
 
         if self.auto_manage_storages_states:
-            self._run_async_safely(self.initialize_storages, "Storage Initialization")
+            self._run_async_safely(
+                self.initialize_storages, "Storage Initialization")
 
     def __del__(self):
         if self.auto_manage_storages_states:
-            self._run_async_safely(self.finalize_storages, "Storage Finalization")
+            self._run_async_safely(
+                self.finalize_storages, "Storage Finalization")
 
     def _run_async_safely(self, async_func, action_name=""):
         """Safely execute an async function, avoiding event loop conflicts."""
@@ -560,7 +571,8 @@ class LightRAG:
         """
         loop = always_get_an_event_loop()
         loop.run_until_complete(
-            self.ainsert(input, split_by_character, split_by_character_only, ids)
+            self.ainsert(input, split_by_character,
+                         split_by_character_only, ids)
         )
 
     async def ainsert(
@@ -615,7 +627,8 @@ class LightRAG:
             new_docs = {doc_key: {"content": full_text}}
 
             _add_doc_keys = await self.full_docs.filter_keys({doc_key})
-            new_docs = {k: v for k, v in new_docs.items() if k in _add_doc_keys}
+            new_docs = {k: v for k, v in new_docs.items()
+                        if k in _add_doc_keys}
             if not len(new_docs):
                 logger.warning("This document is already in the storage.")
                 return
@@ -674,7 +687,8 @@ class LightRAG:
         if ids is not None:
             # Check if the number of IDs matches the number of documents
             if len(ids) != len(input):
-                raise ValueError("Number of IDs must match the number of documents")
+                raise ValueError(
+                    "Number of IDs must match the number of documents")
 
             # Check if IDs are unique
             if len(ids) != len(set(ids)):
@@ -686,7 +700,8 @@ class LightRAG:
             # Clean input text and remove duplicates
             input = list(set(clean_text(doc) for doc in input))
             # Generate contents dict of MD5 hash IDs and documents
-            contents = {compute_mdhash_id(doc, prefix="doc-"): doc for doc in input}
+            contents = {compute_mdhash_id(
+                doc, prefix="doc-"): doc for doc in input}
 
         # 2. Remove duplicate contents
         unique_contents = {
@@ -818,7 +833,8 @@ class LightRAG:
 
                 # 2. split docs into chunks, insert chunks, update doc status
                 docs_batches = [
-                    list(to_process_docs.items())[i : i + self.max_parallel_insert]
+                    list(to_process_docs.items())[
+                        i: i + self.max_parallel_insert]
                     for i in range(0, len(to_process_docs), self.max_parallel_insert)
                 ]
 
@@ -915,7 +931,8 @@ class LightRAG:
                         logger.error(error_msg)
                         async with pipeline_status_lock:
                             pipeline_status["latest_message"] = error_msg
-                            pipeline_status["history_messages"].append(error_msg)
+                            pipeline_status["history_messages"].append(
+                                error_msg)
 
                             # Cancel other tasks as they are no longer meaningful
                             for task in [
@@ -978,7 +995,8 @@ class LightRAG:
                 # Check if there's a pending request to process more documents (with lock)
                 has_pending_request = False
                 async with pipeline_status_lock:
-                    has_pending_request = pipeline_status.get("request_pending", False)
+                    has_pending_request = pipeline_status.get(
+                        "request_pending", False)
                     if has_pending_request:
                         # Clear the request flag before checking for more documents
                         pipeline_status["request_pending"] = False
@@ -1083,7 +1101,8 @@ class LightRAG:
                     if "chunk_order_index" not in chunk_data.keys()
                     else chunk_data["chunk_order_index"]
                 )
-                chunk_id = compute_mdhash_id(chunk_content, prefix="chunk-")
+                # chunk_id = compute_mdhash_id(chunk_content, prefix="chunk-")
+                chunk_id = source_id
 
                 chunk_entry = {
                     "content": chunk_content,
@@ -1099,6 +1118,7 @@ class LightRAG:
                 chunk_to_source_map[source_id] = chunk_id
                 update_storage = True
 
+            print(chunk_to_source_map)
             if all_chunks_data:
                 await asyncio.gather(
                     self.chunks_vdb.upsert(all_chunks_data),
@@ -1110,22 +1130,32 @@ class LightRAG:
             for entity_data in custom_kg.get("entities", []):
                 entity_name = entity_data["entity_name"]
                 entity_type = entity_data.get("entity_type", "UNKNOWN")
-                description = entity_data.get("description", "No description provided")
+                description = entity_data.get(
+                    "description", "No description provided")
                 source_chunk_id = entity_data.get("source_id", "UNKNOWN")
-                source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
-
+                source_ids = source_chunk_id.split("<SEP>")
+                valid_source_ids = [
+                    sid for sid in source_ids if sid in chunk_to_source_map]
+                source_id = "<SEP>".join(
+                    valid_source_ids) if valid_source_ids else "UNKNOWN"
+                mention_count = entity_data.get("mention_count", 1)
+                sentiment_score = entity_data.get("sentiment_score", 0)
+                print(f"Entity '{entity_name}' ==>'{source_chunk_id}'.")
                 # Log if source_id is UNKNOWN
                 if source_id == "UNKNOWN":
                     logger.warning(
                         f"Entity '{entity_name}' has an UNKNOWN source_id. Please check the source mapping."
                     )
-
+                existing_mention_count = await self.chunk_entity_relation_graph.get_existing_mention_count(entity_name, entity_type)
+                existing_sentiment_score = await self.chunk_entity_relation_graph.get_existing_sentiment_score(entity_name, entity_type)
                 # Prepare node data
                 node_data: dict[str, str] = {
                     "entity_id": entity_name,
                     "entity_type": entity_type,
                     "description": description,
                     "source_id": source_id,
+                    "mention_count": mention_count + existing_mention_count,
+                    "sentiment_score": sentiment_score + existing_sentiment_score
                 }
                 # Insert node data into the knowledge graph
                 await self.chunk_entity_relation_graph.upsert_node(
@@ -1145,6 +1175,9 @@ class LightRAG:
                 weight = relationship_data.get("weight", 1.0)
                 source_chunk_id = relationship_data.get("source_id", "UNKNOWN")
                 source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
+                date = relationship_data.get("date", "UNKNOWN")
+                sentiment_score = relationship_data.get(
+                    "sentiment_score", "UNKNOWN")
 
                 # Log if source_id is UNKNOWN
                 if source_id == "UNKNOWN":
@@ -1176,6 +1209,8 @@ class LightRAG:
                         "description": description,
                         "keywords": keywords,
                         "source_id": source_id,
+                        "date": date,
+                        "sentiment_score": sentiment_score
                     },
                 )
                 edge_data: dict[str, str] = {
@@ -1184,6 +1219,8 @@ class LightRAG:
                     "description": description,
                     "keywords": keywords,
                     "source_id": source_id,
+                    "date": date,
+                    "sentiment_score": sentiment_score,
                     "weight": weight,
                 }
                 all_relationships_data.append(edge_data)
@@ -1243,7 +1280,8 @@ class LightRAG:
         """
         loop = always_get_an_event_loop()
 
-        return loop.run_until_complete(self.aquery(query, param, system_prompt))  # type: ignore
+        # type: ignore
+        return loop.run_until_complete(self.aquery(query, param, system_prompt))
 
     async def aquery(
         self,
@@ -1264,6 +1302,18 @@ class LightRAG:
         """
         if param.mode in ["local", "global", "hybrid"]:
             response = await kg_query(
+                query.strip(),
+                self.chunk_entity_relation_graph,
+                self.entities_vdb,
+                self.relationships_vdb,
+                self.text_chunks,
+                param,
+                asdict(self),
+                hashing_kv=self.llm_response_cache,  # Directly use llm_response_cache
+                system_prompt=system_prompt,
+            )
+        elif param.mode == "local_plus":
+            response = await kg_query_plus_with_function_call(
                 query.strip(),
                 self.chunk_entity_relation_graph,
                 self.entities_vdb,
@@ -1300,6 +1350,72 @@ class LightRAG:
         else:
             raise ValueError(f"Unknown mode {param.mode}")
         await self._query_done()
+        return response
+
+    async def ollama_with_function_call(
+        prompt: str,
+        rag: LightRAG,
+        system_prompt: str = None,
+        history_messages: list[dict] = [],
+        **kwargs,
+    ) -> Union[str, dict]:
+        # ✅ Step 1: 定義可用的 function schema
+        functions = [
+            {
+                "name": "get_facet_statistics",
+                "description": "取得某類型節點（如構面）的提及次數與情感分數",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity_type": {
+                            "type": "string",
+                            "description": "節點類型，例如構面、品牌、對象"
+                        }
+                    },
+                    "required": ["entity_type"]
+                }
+            }
+        ]
+
+        # ✅ Step 2: 呼叫模型，讓 LLM 判斷是否要使用工具
+        response = await rag.llm_model_func(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            functions=functions,
+            **kwargs
+        )
+
+        # ✅ Step 3: 若模型選擇呼叫 function，執行相對應查詢
+        if isinstance(response, dict) and "function_call" in response.get("message", {}):
+            function_call = response["message"]["function_call"]
+            func_name = function_call["name"]
+            arguments = json.loads(function_call["arguments"])
+
+            # ✅ 執行構面統計（使用 LightRAG 的內建圖儲存物件）
+            if func_name == "get_facet_statistics":
+                result = await rag.chunk_entity_relation_graph.get_facet_statistics(arguments["entity_type"])
+
+                # ✅ 將結果送回模型做進一步回答
+                final_response = await rag.llm_model_func(
+                    prompt=None,
+                    history_messages=[
+                        *history_messages,
+                        {
+                            "role": "user",
+                            "content": prompt
+                        },
+                        {
+                            "role": "function",
+                            "name": func_name,
+                            "content": json.dumps(result, ensure_ascii=False)
+                        }
+                    ],
+                    **kwargs
+                )
+                return final_response
+
+        # ✅ 若無 function_call，直接回傳原始模型回應
         return response
 
     def query_with_separate_keyword_extraction(
@@ -1507,7 +1623,8 @@ class LightRAG:
                     for dp in entities_storage["data"]
                     if chunk_id in dp.get("source_id")
                 ]
-                logger.debug(f"Chunk {chunk_id} has {len(entities)} related entities")
+                logger.debug(
+                    f"Chunk {chunk_id} has {len(entities)} related entities")
 
                 # Check relationships
                 relationships_storage = await self.relationships_vdb.client_storage
@@ -1516,7 +1633,8 @@ class LightRAG:
                     for dp in relationships_storage["data"]
                     if chunk_id in dp.get("source_id")
                 ]
-                logger.debug(f"Chunk {chunk_id} has {len(relations)} related relations")
+                logger.debug(
+                    f"Chunk {chunk_id} has {len(relations)} related relations")
 
             # Continue with the original deletion process...
 
@@ -1538,7 +1656,8 @@ class LightRAG:
                 node_data = await self.chunk_entity_relation_graph.get_node(node_label)
                 if node_data and "source_id" in node_data:
                     # Split source_id using GRAPH_FIELD_SEP
-                    sources = set(node_data["source_id"].split(GRAPH_FIELD_SEP))
+                    sources = set(
+                        node_data["source_id"].split(GRAPH_FIELD_SEP))
                     sources.difference_update(chunk_ids)
                     if not sources:
                         entities_to_delete.add(node_label)
@@ -1564,7 +1683,8 @@ class LightRAG:
                         )
                         if edge_data and "source_id" in edge_data:
                             # Split source_id using GRAPH_FIELD_SEP
-                            sources = set(edge_data["source_id"].split(GRAPH_FIELD_SEP))
+                            sources = set(
+                                edge_data["source_id"].split(GRAPH_FIELD_SEP))
                             sources.difference_update(chunk_ids)
                             if not sources:
                                 relationships_to_delete.add((src, tgt))
@@ -1573,7 +1693,8 @@ class LightRAG:
                                 )
                             else:
                                 new_source_id = GRAPH_FIELD_SEP.join(sources)
-                                relationships_to_update[(src, tgt)] = new_source_id
+                                relationships_to_update[(
+                                    src, tgt)] = new_source_id
                                 logger.debug(
                                     f"Relationship {src}-{tgt} will be updated with new source_id: {new_source_id}"
                                 )
@@ -1586,7 +1707,8 @@ class LightRAG:
                 await self.chunk_entity_relation_graph.remove_nodes(
                     list(entities_to_delete)
                 )
-                logger.debug(f"Deleted {len(entities_to_delete)} entities from graph")
+                logger.debug(
+                    f"Deleted {len(entities_to_delete)} entities from graph")
 
             # Update entities
             for entity, new_source_id in entities_to_update.items():
@@ -1606,7 +1728,8 @@ class LightRAG:
                     rel_id_0 = compute_mdhash_id(src + tgt, prefix="rel-")
                     rel_id_1 = compute_mdhash_id(tgt + src, prefix="rel-")
                     await self.relationships_vdb.delete([rel_id_0, rel_id_1])
-                    logger.debug(f"Deleted relationship {src}-{tgt} from vector DB")
+                    logger.debug(
+                        f"Deleted relationship {src}-{tgt} from vector DB")
                 await self.chunk_entity_relation_graph.remove_edges(
                     list(relationships_to_delete)
                 )
@@ -1656,7 +1779,8 @@ class LightRAG:
 
                     for item in data_with_chunk:
                         old_sources = item["source_id"].split(GRAPH_FIELD_SEP)
-                        new_sources = [src for src in old_sources if src != chunk_id]
+                        new_sources = [
+                            src for src in old_sources if src != chunk_id]
 
                         if not new_sources:
                             logger.info(
@@ -1664,7 +1788,8 @@ class LightRAG:
                             )
                             await vdb.delete_entity(item)
                         else:
-                            item["source_id"] = GRAPH_FIELD_SEP.join(new_sources)
+                            item["source_id"] = GRAPH_FIELD_SEP.join(
+                                new_sources)
                             item_id = item["__id__"]
                             data_for_vdb[item_id] = item.copy()
                             if data_type == "entities":
@@ -1686,13 +1811,15 @@ class LightRAG:
 
                     if data_for_vdb:
                         await vdb.upsert(data_for_vdb)
-                        logger.info(f"Successfully updated {data_type} in vector DB")
+                        logger.info(
+                            f"Successfully updated {data_type} in vector DB")
 
             # Add verification step
             async def verify_deletion():
                 # Verify if the document has been deleted
                 if await self.full_docs.get_by_id(doc_id):
-                    logger.warning(f"Document {doc_id} still exists in full_docs")
+                    logger.warning(
+                        f"Document {doc_id} still exists in full_docs")
 
                 # Verify if chunks have been deleted
                 all_remaining_chunks = await self.text_chunks.get_all()
@@ -1884,7 +2011,8 @@ class LightRAG:
 
             # If renaming entity
             if is_renaming:
-                logger.info(f"Renaming entity '{entity_name}' to '{new_entity_name}'")
+                logger.info(
+                    f"Renaming entity '{entity_name}' to '{new_entity_name}'")
 
                 # Create new entity
                 await self.chunk_entity_relation_graph.upsert_node(
@@ -2256,9 +2384,11 @@ class LightRAG:
             )
 
             if not source_exists:
-                raise ValueError(f"Source entity '{source_entity}' does not exist")
+                raise ValueError(
+                    f"Source entity '{source_entity}' does not exist")
             if not target_exists:
-                raise ValueError(f"Target entity '{target_entity}' does not exist")
+                raise ValueError(
+                    f"Target entity '{target_entity}' does not exist")
 
             # Check if relation already exists
             existing_edge = await self.chunk_entity_relation_graph.has_edge(
@@ -2398,7 +2528,8 @@ class LightRAG:
                     entity_name
                 )
                 if not node_exists:
-                    raise ValueError(f"Source entity '{entity_name}' does not exist")
+                    raise ValueError(
+                        f"Source entity '{entity_name}' does not exist")
                 node_data = await self.chunk_entity_relation_graph.get_node(entity_name)
                 source_entities_data[entity_name] = node_data
 
@@ -2417,8 +2548,7 @@ class LightRAG:
 
             # 3. Merge entity data
             merged_entity_data = self._merge_entity_attributes(
-                list(source_entities_data.values())
-                + ([existing_target_entity_data] if target_exists else []),
+                list(source_entities_data.values()),
                 merge_strategy,
             )
 
@@ -2429,39 +2559,21 @@ class LightRAG:
             # 4. Get all relationships of the source entities
             all_relations = []
             for entity_name in source_entities:
-                # Get all relationships where this entity is the source
-                outgoing_edges = await self.chunk_entity_relation_graph.get_node_edges(
+                # Get all relationships of the source entities
+                edges = await self.chunk_entity_relation_graph.get_node_edges(
                     entity_name
                 )
-                if outgoing_edges:
-                    for src, tgt in outgoing_edges:
+                if edges:
+                    for src, tgt in edges:
                         # Ensure src is the current entity
                         if src == entity_name:
                             edge_data = await self.chunk_entity_relation_graph.get_edge(
                                 src, tgt
                             )
-                            all_relations.append(("outgoing", src, tgt, edge_data))
-
-                # Get all relationships where this entity is the target
-                incoming_edges = []
-                all_labels = await self.chunk_entity_relation_graph.get_all_labels()
-                for label in all_labels:
-                    if label == entity_name:
-                        continue
-                    node_edges = await self.chunk_entity_relation_graph.get_node_edges(
-                        label
-                    )
-                    for src, tgt in node_edges or []:
-                        if tgt == entity_name:
-                            incoming_edges.append((src, tgt))
-
-                for src, tgt in incoming_edges:
-                    edge_data = await self.chunk_entity_relation_graph.get_edge(
-                        src, tgt
-                    )
-                    all_relations.append(("incoming", src, tgt, edge_data))
+                            all_relations.append((src, tgt, edge_data))
 
             # 5. Create or update the target entity
+            merged_entity_data["entity_id"] = target_entity
             if not target_exists:
                 await self.chunk_entity_relation_graph.upsert_node(
                     target_entity, merged_entity_data
@@ -2471,12 +2583,18 @@ class LightRAG:
                 await self.chunk_entity_relation_graph.upsert_node(
                     target_entity, merged_entity_data
                 )
-                logger.info(f"Updated existing target entity '{target_entity}'")
+                logger.info(
+                    f"Updated existing target entity '{target_entity}'")
 
             # 6. Recreate all relationships, pointing to the target entity
             relation_updates = {}  # Track relationships that need to be merged
+            relations_to_delete = []
 
-            for rel_type, src, tgt, edge_data in all_relations:
+            for src, tgt, edge_data in all_relations:
+                relations_to_delete.append(
+                    compute_mdhash_id(src + tgt, prefix="rel-"))
+                relations_to_delete.append(
+                    compute_mdhash_id(tgt + src, prefix="rel-"))
                 new_src = target_entity if src in source_entities else src
                 new_tgt = target_entity if tgt in source_entities else tgt
 
@@ -2519,6 +2637,12 @@ class LightRAG:
                 )
                 logger.info(
                     f"Created or updated relationship: {rel_data['src']} -> {rel_data['tgt']}"
+                )
+
+                # Delete relationships records from vector database
+                await self.relationships_vdb.delete(relations_to_delete)
+                logger.info(
+                    f"Deleted {len(relations_to_delete)} relation records for entity '{entity_name}' from vector database"
                 )
 
             # 7. Update entity vector representation
@@ -2582,19 +2706,6 @@ class LightRAG:
                 # Delete entity record from vector database
                 entity_id = compute_mdhash_id(entity_name, prefix="ent-")
                 await self.entities_vdb.delete([entity_id])
-
-                # Also ensure any relationships specific to this entity are deleted from vector DB
-                # This is a safety check, as these should have been transformed to the target entity already
-                entity_relation_prefix = compute_mdhash_id(entity_name, prefix="rel-")
-                relations_with_entity = await self.relationships_vdb.search_by_prefix(
-                    entity_relation_prefix
-                )
-                if relations_with_entity:
-                    relation_ids = [r["id"] for r in relations_with_entity]
-                    await self.relationships_vdb.delete(relation_ids)
-                    logger.info(
-                        f"Deleted {len(relation_ids)} relation records for entity '{entity_name}' from vector database"
-                    )
 
                 logger.info(
                     f"Deleted source entity '{entity_name}' and its vector embedding from database"
@@ -2674,7 +2785,8 @@ class LightRAG:
                         ),  # Convert to string
                     }
                     if include_vector_data and "vector_data" in relation_info:
-                        relation_row["vector_data"] = str(relation_info["vector_data"])
+                        relation_row["vector_data"] = str(
+                            relation_info["vector_data"])
                     relations_data.append(relation_row)
 
         # --- Relationships (from VectorDB) ---
@@ -2694,7 +2806,8 @@ class LightRAG:
                 # Entities
                 if entities_data:
                     csvfile.write("# ENTITIES\n")
-                    writer = csv.DictWriter(csvfile, fieldnames=entities_data[0].keys())
+                    writer = csv.DictWriter(
+                        csvfile, fieldnames=entities_data[0].keys())
                     writer.writeheader()
                     writer.writerows(entities_data)
                     csvfile.write("\n\n")
@@ -2721,10 +2834,12 @@ class LightRAG:
         elif file_format == "excel":
             # Excel export
             entities_df = (
-                pd.DataFrame(entities_data) if entities_data else pd.DataFrame()
+                pd.DataFrame(
+                    entities_data) if entities_data else pd.DataFrame()
             )
             relations_df = (
-                pd.DataFrame(relations_data) if relations_data else pd.DataFrame()
+                pd.DataFrame(
+                    relations_data) if relations_data else pd.DataFrame()
             )
             relationships_df = (
                 pd.DataFrame(relationships_data)
@@ -2734,9 +2849,11 @@ class LightRAG:
 
             with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
                 if not entities_df.empty:
-                    entities_df.to_excel(writer, sheet_name="Entities", index=False)
+                    entities_df.to_excel(
+                        writer, sheet_name="Entities", index=False)
                 if not relations_df.empty:
-                    relations_df.to_excel(writer, sheet_name="Relations", index=False)
+                    relations_df.to_excel(
+                        writer, sheet_name="Relations", index=False)
                 if not relationships_df.empty:
                     relationships_df.to_excel(
                         writer, sheet_name="Relationships", index=False
@@ -2751,7 +2868,8 @@ class LightRAG:
                 mdfile.write("## Entities\n\n")
                 if entities_data:
                     # Write header
-                    mdfile.write("| " + " | ".join(entities_data[0].keys()) + " |\n")
+                    mdfile.write(
+                        "| " + " | ".join(entities_data[0].keys()) + " |\n")
                     mdfile.write(
                         "| "
                         + " | ".join(["---"] * len(entities_data[0].keys()))
@@ -2761,7 +2879,8 @@ class LightRAG:
                     # Write rows
                     for entity in entities_data:
                         mdfile.write(
-                            "| " + " | ".join(str(v) for v in entity.values()) + " |\n"
+                            "| " + " | ".join(str(v)
+                                              for v in entity.values()) + " |\n"
                         )
                     mdfile.write("\n\n")
                 else:
@@ -2771,7 +2890,8 @@ class LightRAG:
                 mdfile.write("## Relations\n\n")
                 if relations_data:
                     # Write header
-                    mdfile.write("| " + " | ".join(relations_data[0].keys()) + " |\n")
+                    mdfile.write(
+                        "| " + " | ".join(relations_data[0].keys()) + " |\n")
                     mdfile.write(
                         "| "
                         + " | ".join(["---"] * len(relations_data[0].keys()))
@@ -2794,11 +2914,13 @@ class LightRAG:
                 if relationships_data:
                     # Write header
                     mdfile.write(
-                        "| " + " | ".join(relationships_data[0].keys()) + " |\n"
+                        "| " +
+                        " | ".join(relationships_data[0].keys()) + " |\n"
                     )
                     mdfile.write(
                         "| "
-                        + " | ".join(["---"] * len(relationships_data[0].keys()))
+                        + " | ".join(["---"] *
+                                     len(relationships_data[0].keys()))
                         + " |\n"
                     )
 
@@ -2824,10 +2946,12 @@ class LightRAG:
                 if entities_data:
                     # Create fixed width columns
                     col_widths = {
-                        k: max(len(k), max(len(str(e[k])) for e in entities_data))
+                        k: max(len(k), max(len(str(e[k]))
+                               for e in entities_data))
                         for k in entities_data[0]
                     }
-                    header = "  ".join(k.ljust(col_widths[k]) for k in entities_data[0])
+                    header = "  ".join(
+                        k.ljust(col_widths[k]) for k in entities_data[0])
                     txtfile.write(header + "\n")
                     txtfile.write("-" * len(header) + "\n")
 
@@ -2847,7 +2971,8 @@ class LightRAG:
                 if relations_data:
                     # Create fixed width columns
                     col_widths = {
-                        k: max(len(k), max(len(str(r[k])) for r in relations_data))
+                        k: max(len(k), max(len(str(r[k]))
+                               for r in relations_data))
                         for k in relations_data[0]
                     }
                     header = "  ".join(
@@ -2872,7 +2997,8 @@ class LightRAG:
                 if relationships_data:
                     # Create fixed width columns
                     col_widths = {
-                        k: max(len(k), max(len(str(r[k])) for r in relationships_data))
+                        k: max(len(k), max(len(str(r[k]))
+                               for r in relationships_data))
                         for k in relationships_data[0]
                     }
                     header = "  ".join(
@@ -2896,7 +3022,8 @@ class LightRAG:
                 f"Choose from: csv, excel, md, txt"
             )
         if file_format is not None:
-            print(f"Data exported to: {output_path} with format: {file_format}")
+            print(
+                f"Data exported to: {output_path} with format: {file_format}")
         else:
             print("Data displayed as table format")
 
@@ -2979,7 +3106,8 @@ class LightRAG:
         # Merge values for each key
         for key in all_keys:
             # Get all values for this key
-            values = [data.get(key) for data in entity_data_list if data.get(key)]
+            values = [data.get(key)
+                      for data in entity_data_list if data.get(key)]
 
             if not values:
                 continue
@@ -2988,7 +3116,8 @@ class LightRAG:
             strategy = merge_strategy.get(key, "keep_first")
 
             if strategy == "concatenate":
-                merged_data[key] = "\n\n".join(values)
+                merged_data[key] = "、".join(values)
+
             elif strategy == "keep_first":
                 merged_data[key] = values[0]
             elif strategy == "keep_last":
@@ -2997,9 +3126,20 @@ class LightRAG:
                 # Handle fields separated by GRAPH_FIELD_SEP
                 unique_items = set()
                 for value in values:
-                    items = value.split(GRAPH_FIELD_SEP)
+                    items = str(value).split(GRAPH_FIELD_SEP)
                     unique_items.update(items)
                 merged_data[key] = GRAPH_FIELD_SEP.join(unique_items)
+            elif strategy == "add":
+                if key not in merged_data:
+                    merged_data[key] = 0
+                for value in values:
+                    merged_data[key] += value
+            elif strategy == "max":
+                # For numeric fields like weight
+                try:
+                    merged_data[key] = max(float(v) for v in values)
+                except (ValueError, TypeError):
+                    merged_data[key] = values[0]
             else:
                 # Default strategy
                 merged_data[key] = values[0]
@@ -3041,7 +3181,7 @@ class LightRAG:
             strategy = merge_strategy.get(key, "keep_first")
 
             if strategy == "concatenate":
-                merged_data[key] = "\n\n".join(str(v) for v in values)
+                merged_data[key] = "、".join(str(v) for v in values)
             elif strategy == "keep_first":
                 merged_data[key] = values[0]
             elif strategy == "keep_last":
@@ -3076,4 +3216,145 @@ class LightRAG:
                     self.chunk_entity_relation_graph,
                 ]
             ]
+        )
+
+    async def _auto_merge_similar_entities(
+        self,
+        similarity_threshold: float = 0.8,
+        top_k: int = 5,
+        merge_strategy: Optional[dict[str, str]] = None,
+        target_entity_data: Optional[dict[str, Any]] = None,
+        type: str = "對象"
+    ) -> None:
+        """
+        根據向量相似度，自動尋找並合併相似的實體。
+
+        此方法會：
+        1. 取得所有實體，並對每個實體在向量資料庫進行搜尋，找出相似度高於指定閾值的其他實體。
+        2. 自動選擇該群組中的一個實體作為目標實體，並透過 amerge_entities 進行合併。
+        3. 依序處理整個知識圖中的所有實體，直到無法再找到可合併的相似實體為止。
+
+        Args:
+            similarity_threshold: 相似度閾值，預設為 0.8，代表只有相似度 >= 0.8 的實體會被自動視為同群組
+            top_k: 搜尋時一次擷取的相似實體數量上限
+            merge_strategy: 與 amerge_entities 相同的合併策略，可傳入特定字段的合併方式
+            target_entity_data: 與 amerge_entities 相同，合併時如果要覆蓋目標實體的部分欄位，可在此指定
+
+        Returns:
+            無直接回傳值。合併完成後，實際變動會直接影響知識圖與向量資料庫的內容。
+        """
+        # Default merge strategy
+        default_strategy = {
+            "description": "concatenate",
+            "entity_type": "keep_first",
+            "source_id": "join_unique",
+        }
+
+        merge_strategy = (
+            default_strategy
+            if merge_strategy is None
+            else {**default_strategy, **merge_strategy}
+        )
+
+        if target_entity_data is None:
+            target_entity_data = {}
+
+        # 一次取回所有實體（假設來自 Knowledge Graph 或 vector DB）
+        all_entities = await self.chunk_entity_relation_graph.get_all_labels()
+
+        merged_set = set()  # 紀錄已經被合併或處理的實體
+
+        for entity in all_entities:
+            # 如果此實體已經被合併或標記過，就跳過
+            if entity in merged_set:
+                continue
+
+            # 1. 為當前實體計算 embedding（文字 -> 向量）
+            search_query = entity
+            search_results = await self.entities_vdb.query(search_query, top_k=top_k)
+
+            # 2) 取得當前實體的資料 (主要是用來拿 entity_type)
+            entity_data = await self.chunk_entity_relation_graph.get_node(entity)
+            current_entity_type = entity_data.get("entity_type", None)
+            if current_entity_type not in ["商品", "服務"]:
+                continue
+            print(f"\n查詢字串: {search_query}")
+            print("取得的相似結果:")
+            for r in search_results[1:]:
+                print(r["entity_name"], r.get("distance"))
+
+            # 3. 過濾出相似度 >= threshold 的實體
+            similar_entities = []
+            for r in search_results:
+                name = r["entity_name"]
+                score = r.get("distance", 0.0)
+                if name == entity:
+                    continue
+                if score < similarity_threshold:
+                    continue
+
+                # 3a) 取出搜尋結果實體的 entity_type
+                r_data = await self.chunk_entity_relation_graph.get_node(name)
+                r_entity_type = r_data.get("entity_type", None)
+                print(
+                    f"r_entity_type: {r_entity_type} current_entity_type: {current_entity_type}")
+                # 3b) 只有相同 entity_type 的才加入
+                if current_entity_type and r_entity_type and (r_entity_type in ["商品", "服務"] and current_entity_type in ["商品", "服務"]):
+                    similar_entities.append(name)
+
+            if not similar_entities:
+                # 沒有發現相似的實體，直接標記已處理
+                merged_set.add(entity)
+                continue
+
+            # 4. 選擇當前實體作為目標實體，將相似實體併入
+            target_entity = entity
+            source_entities = similar_entities[:]
+            source_entities.append(target_entity)
+
+            # 5. 呼叫已有的 amerge_entities 進行合併
+            try:
+                merged_info = await self.amerge_entities(
+                    source_entities=source_entities,
+                    target_entity=target_entity,
+                    merge_strategy=merge_strategy,
+                    target_entity_data=target_entity_data,
+                )
+                print(
+                    f"[auto_merge_similar_entities] 已將實體群組 {source_entities} 合併成目標實體：{target_entity}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[auto_merge_similar_entities] 合併實體群組 {source_entities} 時發生錯誤：{e}"
+                )
+                continue
+
+            # 6. 標記所有被合併過的實體
+            merged_set.update(source_entities)
+
+        logger.info("[auto_merge_similar_entities] 完成所有相似實體的自動合併作業。")
+
+    def auto_merge_similar_entities(
+        self,
+        similarity_threshold: float = 0.8,
+        top_k: int = 5,
+        merge_strategy: Optional[dict[str, str]] = None,
+        target_entity_data: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """
+        同步版本：呼叫 async auto_merge_similar_entities。
+        """
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        loop.run_until_complete(
+            self._auto_merge_similar_entities(
+                similarity_threshold=similarity_threshold,
+                top_k=top_k,
+                merge_strategy=merge_strategy,
+                target_entity_data=target_entity_data,
+            )
         )

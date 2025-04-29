@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import re
 import os
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Union
 from collections import Counter, defaultdict
 
 from .utils import (
@@ -37,7 +38,7 @@ from .base import (
 from .prompt import GRAPH_FIELD_SEP, PROMPTS
 import time
 from dotenv import load_dotenv
-
+chunk_entity_relation_graph: BaseGraphStorage
 # Load environment variables
 load_dotenv(override=True)
 
@@ -57,17 +58,19 @@ def chunking_by_token_size(
         new_chunks = []
         if split_by_character_only:
             for chunk in raw_chunks:
-                _tokens = encode_string_by_tiktoken(chunk, model_name=tiktoken_model)
+                _tokens = encode_string_by_tiktoken(
+                    chunk, model_name=tiktoken_model)
                 new_chunks.append((len(_tokens), chunk))
         else:
             for chunk in raw_chunks:
-                _tokens = encode_string_by_tiktoken(chunk, model_name=tiktoken_model)
+                _tokens = encode_string_by_tiktoken(
+                    chunk, model_name=tiktoken_model)
                 if len(_tokens) > max_token_size:
                     for start in range(
                         0, len(_tokens), max_token_size - overlap_token_size
                     ):
                         chunk_content = decode_tokens_by_tiktoken(
-                            _tokens[start : start + max_token_size],
+                            _tokens[start: start + max_token_size],
                             model_name=tiktoken_model,
                         )
                         new_chunks.append(
@@ -88,7 +91,7 @@ def chunking_by_token_size(
             range(0, len(tokens), max_token_size - overlap_token_size)
         ):
             chunk_content = decode_tokens_by_tiktoken(
-                tokens[start : start + max_token_size], model_name=tiktoken_model
+                tokens[start: start + max_token_size], model_name=tiktoken_model
             )
             results.append(
                 {
@@ -117,7 +120,8 @@ async def _handle_entity_relation_summary(
         "language", PROMPTS["DEFAULT_LANGUAGE"]
     )
 
-    tokens = encode_string_by_tiktoken(description, model_name=tiktoken_model_name)
+    tokens = encode_string_by_tiktoken(
+        description, model_name=tiktoken_model_name)
     if len(tokens) < summary_max_tokens:  # No need for summary
         return description
     prompt_template = PROMPTS["summarize_entity_descriptions"]
@@ -218,7 +222,8 @@ async def _merge_nodes_then_upsert(
     if already_node is not None:
         already_entity_types.append(already_node["entity_type"])
         already_source_ids.extend(
-            split_string_by_multi_markers(already_node["source_id"], [GRAPH_FIELD_SEP])
+            split_string_by_multi_markers(
+                already_node["source_id"], [GRAPH_FIELD_SEP])
         )
         already_description.append(already_node["description"])
 
@@ -230,7 +235,8 @@ async def _merge_nodes_then_upsert(
         reverse=True,
     )[0][0]
     description = GRAPH_FIELD_SEP.join(
-        sorted(set([dp["description"] for dp in nodes_data] + already_description))
+        sorted(set([dp["description"]
+               for dp in nodes_data] + already_description))
     )
     source_id = GRAPH_FIELD_SEP.join(
         set([dp["source_id"] for dp in nodes_data] + already_source_ids)
@@ -296,7 +302,8 @@ async def _merge_edges_then_upsert(
     description = GRAPH_FIELD_SEP.join(
         sorted(
             set(
-                [dp["description"] for dp in edges_data if dp.get("description")]
+                [dp["description"]
+                    for dp in edges_data if dp.get("description")]
                 + already_description
             )
         )
@@ -404,7 +411,8 @@ async def extract_entities(
         language=language,
     )
 
-    continue_prompt = PROMPTS["entity_continue_extraction"].format(**context_base)
+    continue_prompt = PROMPTS["entity_continue_extraction"].format(
+        **context_base)
     if_loop_prompt = PROMPTS["entity_if_loop_extraction"]
 
     processed_chunks = 0
@@ -528,7 +536,8 @@ async def extract_entities(
                 continue_prompt, history_messages=history
             )
 
-            history += pack_user_ass_to_openai_messages(continue_prompt, glean_result)
+            history += pack_user_ass_to_openai_messages(
+                continue_prompt, glean_result)
 
             # Process gleaning result separately
             glean_nodes, glean_edges = await _process_extraction_result(
@@ -581,7 +590,8 @@ async def extract_entities(
     async with graph_db_lock:
         all_entities_data = await asyncio.gather(
             *[
-                _merge_nodes_then_upsert(k, v, knowledge_graph_inst, global_config)
+                _merge_nodes_then_upsert(
+                    k, v, knowledge_graph_inst, global_config)
                 for k, v in maybe_nodes.items()
             ]
         )
@@ -732,14 +742,127 @@ async def kg_query(
         history_context = get_conversation_turns(
             query_param.conversation_history, query_param.history_turns
         )
-
     sys_prompt_temp = system_prompt if system_prompt else PROMPTS["rag_response"]
     sys_prompt = sys_prompt_temp.format(
         context_data=context,
         response_type=query_param.response_type,
         history=history_context,
     )
+    if query_param.only_need_prompt:
+        return sys_prompt
 
+    len_of_prompts = len(encode_string_by_tiktoken(query + sys_prompt))
+    logger.debug(f"[kg_query]Prompt Tokens: {len_of_prompts}")
+
+    response = await use_model_func(
+        query,
+        system_prompt=sys_prompt,
+        stream=query_param.stream,
+    )
+    if isinstance(response, str) and len(response) > len(sys_prompt):
+        response = (
+            response.replace(sys_prompt, "")
+            .replace("user", "")
+            .replace("model", "")
+            .replace(query, "")
+            .replace("<system>", "")
+            .replace("</system>", "")
+            .strip()
+        )
+
+    # Save to cache
+    await save_to_cache(
+        hashing_kv,
+        CacheData(
+            args_hash=args_hash,
+            content=response,
+            prompt=query,
+            quantized=quantized,
+            min_val=min_val,
+            max_val=max_val,
+            mode=query_param.mode,
+            cache_type="query",
+        ),
+    )
+    return response
+
+
+async def kg_query(
+    query: str,
+    knowledge_graph_inst: BaseGraphStorage,
+    entities_vdb: BaseVectorStorage,
+    relationships_vdb: BaseVectorStorage,
+    text_chunks_db: BaseKVStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None,
+) -> str | AsyncIterator[str]:
+    # Handle cache
+    use_model_func = global_config["llm_model_func"]
+    args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+    cached_response, quantized, min_val, max_val = await handle_cache(
+        hashing_kv, args_hash, query, query_param.mode, cache_type="query"
+    )
+    if cached_response is not None:
+        return cached_response
+
+    # Extract keywords using extract_keywords_only function which already supports conversation history
+    hl_keywords, ll_keywords = await extract_keywords_only(
+        query, query_param, global_config, hashing_kv
+    )
+
+    logger.debug(f"High-level keywords: {hl_keywords}")
+    logger.debug(f"Low-level  keywords: {ll_keywords}")
+
+    # Handle empty keywords
+    if hl_keywords == [] and ll_keywords == []:
+        logger.warning("low_level_keywords and high_level_keywords is empty")
+        return PROMPTS["fail_response"]
+    if ll_keywords == [] and query_param.mode in ["local", "hybrid"]:
+        logger.warning(
+            "low_level_keywords is empty, switching from %s mode to global mode",
+            query_param.mode,
+        )
+        query_param.mode = "global"
+    if hl_keywords == [] and query_param.mode in ["global", "hybrid"]:
+        logger.warning(
+            "high_level_keywords is empty, switching from %s mode to local mode",
+            query_param.mode,
+        )
+        query_param.mode = "local"
+
+    ll_keywords_str = ", ".join(ll_keywords) if ll_keywords else ""
+    hl_keywords_str = ", ".join(hl_keywords) if hl_keywords else ""
+
+    # Build context
+    context = await _build_query_context(
+        ll_keywords_str,
+        hl_keywords_str,
+        knowledge_graph_inst,
+        entities_vdb,
+        relationships_vdb,
+        text_chunks_db,
+        query_param,
+    )
+
+    if query_param.only_need_context:
+        return context
+    if context is None:
+        return PROMPTS["fail_response"]
+
+    # Process conversation history
+    history_context = ""
+    if query_param.conversation_history:
+        history_context = get_conversation_turns(
+            query_param.conversation_history, query_param.history_turns
+        )
+    sys_prompt_temp = system_prompt if system_prompt else PROMPTS["rag_response"]
+    sys_prompt = sys_prompt_temp.format(
+        context_data=context,
+        response_type=query_param.response_type,
+        history=history_context,
+    )
     if query_param.only_need_prompt:
         return sys_prompt
 
@@ -837,7 +960,6 @@ async def extract_keywords_only(
     # 5. Call the LLM for keyword extraction
     use_model_func = global_config["llm_model_func"]
     result = await use_model_func(kw_prompt, keyword_extraction=True)
-
     # 6. Parse out JSON from the LLM response
     match = re.search(r"\{.*\}", result, re.DOTALL)
     if not match:
@@ -871,7 +993,547 @@ async def extract_keywords_only(
                 cache_type="keywords",
             ),
         )
+    print("hl_keywords: ", hl_keywords, " ll_keywords: ", ll_keywords)
     return hl_keywords, ll_keywords
+
+
+async def kg_query_plus(
+    query: str,
+    knowledge_graph_inst: BaseGraphStorage,
+    entities_vdb: BaseVectorStorage,
+    relationships_vdb: BaseVectorStorage,
+    text_chunks_db: BaseKVStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None
+) -> str | AsyncIterator[str]:
+    # Handle cache
+    use_model_func = global_config["llm_model_func"]
+    args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+    cached_response, quantized, min_val, max_val = await handle_cache(
+        hashing_kv, args_hash, query, query_param.mode, cache_type="query"
+    )
+    if cached_response is not None:
+        return cached_response
+
+    # Extract keywords using extract_keywords_only function which already supports conversation history
+    keywords = await extract_keywords_only_plus(
+        query, query_param, global_config, hashing_kv
+    )
+
+    logger.debug(f"keywords: {keywords}")
+
+    # Handle empty keywords
+    if keywords == []:
+        logger.warning("keywords is empty")
+        return PROMPTS["fail_response"]
+
+    keywords_str = ", ".join(keywords) if keywords else ""
+    global chunk_entity_relation_graph
+    chunk_entity_relation_graph = knowledge_graph_inst
+    # Build context
+    context = await _build_query_context(
+        keywords_str,
+        "",
+        knowledge_graph_inst,
+        entities_vdb,
+        relationships_vdb,
+        text_chunks_db,
+        query_param,
+    )
+
+    if query_param.only_need_context:
+        return context
+    if context is None:
+        return PROMPTS["fail_response"]
+
+    # Process conversation history
+    history_context = ""
+    if query_param.conversation_history:
+        history_context = get_conversation_turns(
+            query_param.conversation_history, query_param.history_turns
+        )
+    sys_prompt_temp = system_prompt if system_prompt else PROMPTS["rag_response"]
+    sys_prompt = sys_prompt_temp.format(
+        context_data=context,
+        response_type=query_param.response_type,
+        history=history_context,
+    )
+    if query_param.only_need_prompt:
+        return sys_prompt
+
+    len_of_prompts = len(encode_string_by_tiktoken(query + sys_prompt))
+    logger.debug(f"[kg_query]Prompt Tokens: {len_of_prompts}")
+
+    response = await use_model_func(
+        query,
+        tools=[],
+        system_prompt=sys_prompt,
+        stream=query_param.stream,
+    )
+    if isinstance(response, str) and len(response) > len(sys_prompt):
+        response = (
+            response.replace(sys_prompt, "")
+            .replace("user", "")
+            .replace("model", "")
+            .replace(query, "")
+            .replace("<system>", "")
+            .replace("</system>", "")
+            .strip()
+        )
+
+    # Save to cache
+    await save_to_cache(
+        hashing_kv,
+        CacheData(
+            args_hash=args_hash,
+            content=response,
+            prompt=query,
+            quantized=quantized,
+            min_val=min_val,
+            max_val=max_val,
+            mode=query_param.mode,
+            cache_type="query",
+        ),
+    )
+    return response
+
+
+async def get_function_call_results(
+    text: str,
+    param: QueryParam,
+    global_config: dict[str, str],
+    knowledge_graph_inst: BaseGraphStorage,
+    sys_prompt: str | None = None,
+) -> tuple[list[str], list[str]]:
+
+    use_model_func = global_config["llm_model_func"]
+    # 定義 function calling tool
+    available_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "extract_time_ranges",
+                "description": "根據使用者提出的市場問題，自動萃取出時間區間（開始與結束日期）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "time_ranges": {
+                            "type": "array",
+                            "description": "時間區間列表",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "start_date": {
+                                        "type": "string",
+                                        "description": "區間的開始日期，格式為 YYYY-MM-DD"
+                                    },
+                                    "end_date": {
+                                        "type": "string",
+                                        "description": "區間的結束日期，格式為 YYYY-MM-DD"
+                                    }
+                                },
+                                "required": ["start_date", "end_date"]
+                            }
+                        }
+                    },
+                    "required": ["time_ranges"]
+                }
+            }
+        }
+
+        # {
+        #     "type": "function",
+        #     "function": {
+        #         "name": "get_entity_statistics",
+        #         "description": "當使用者想查詢某一類節點（品牌、類型、商品、服務）中哪些項目『出現頻率較高』或『情感評價較好／較差』時，請使用此函數。使用時，務必根據使用者問題中的分析重點，從下列四個節點類型中擇一填入 node_type：品牌、類型、商品、服務。⚠️ 請勿使用其他字詞，僅能從上述五個值中選擇，且需完全對應。",
+        #         "parameters": {
+        #             "type": "object",
+        #             "properties": {
+        #                 "node_type": {
+        #                     "type": "string",
+        #                     "enum": ["品牌", "類型", "商品", "服務"],
+        #                     "description": "欲查詢的節點類型，只能從以下四個字詞中擇一填入，且必須完全一致（不得翻譯、拼錯或創造）：品牌、類型、商品、服務"
+        #                 },
+        #                 "start_time": {
+        #                     "type": "string",
+        #                     "format": "date-time",
+        #                     "description": "查詢的起始日期，使用ISO 8601格式，如2025-01-01"
+        #                 },
+        #                 "end_time": {
+        #                     "type": "string",
+        #                     "format": "date-time",
+        #                     "description": "查詢的結束日期，使用ISO 8601格式，如2025-12-31"
+        #                 }
+        #             },
+        #             "required": ["node_type"]
+        #         }
+        #     }
+        # },
+        # # {
+        # #     "type": "function",
+        # #     "function": {
+        # #         "name": "get_facet_statistics",
+        # #         "description": "當使用者想查詢某一類型(商品、服務)的構面中哪些項目『出現頻率較高』、『情感評價較好／較差』或『標竿商品為何』時，請使用此函數。使用時，務必根據使用者問題中的分析重點，從下列兩個構面類型中擇一填入或是不填 facet_type：商品、服務。⚠️ 請勿使用其他字詞，僅能從上述兩個值中選擇，且需完全對應。",
+        # #         "parameters": {
+        # #             "type": "object",
+        # #             "properties": {
+        # #                 "facet_type": {
+        # #                     "type": "string",
+        # #                     "enum": ["商品", "服務"],
+        # #                     "description": "欲查詢的構面所屬的類型，只能從以下兩個字詞中擇一填入，且必須完全一致（不得翻譯、拼錯或創造）：商品、服務"
+        # #                 },
+        # #                 "start_time": {
+        # #                     "type": "string",
+        # #                     "format": "date-time",
+        # #                     "description": "查詢的起始日期，使用ISO 8601格式，如2025-01-01"
+        # #                 },
+        # #                 "end_time": {
+        # #                     "type": "string",
+        # #                     "format": "date-time",
+        # #                     "description": "查詢的結束日期，使用ISO 8601格式，如2025-12-31"
+        # #                 }
+        # #             }
+        # #         }
+        # #     }
+        # # },
+        # # {
+        # #     "type": "function",
+        # #     "function": {
+        # #         "name": "get_facet_influence",
+        # #         "description": "當使用者想查詢哪項商品在某個構面中的表現較好時，請使用此函數。使用時，務必根據使用者問題中的分析重點，了解目標構面",
+        # #         "parameters": {
+        # #             "type": "object",
+        # #             "properties": {
+        # #                 "facet_name": {
+        # #                     "type": "string",
+        # #                     "description": "欲查詢的構面名稱"
+        # #                 }
+        # #             },
+        # #             "required": ["facet_name"]
+        # #         }
+        # #     }
+        # # }
+
+    ]
+
+    # async def get_entity_statistics_for_function_call(node_type: str, start_time: str = Any | None, end_time: str = Any | None):
+    #     """
+    #     透過給定的 node_type 來提取該節點類型的所有實體的提及次數與情感分數。
+
+    #     Args:
+    #     node_type (str): 欲查詢的節點類型，只能從以下五個字詞中擇一填入，且必須完全一致（不得翻譯、拼錯或創造）："品牌"、"類型"、"商品"、"服務"、"構面"
+
+    #     Returns:
+    #     list[dict]: 一個含有實體名稱、實體提及次數、實體情感分數的列表
+    #     """
+    #     entity_statistics = await knowledge_graph_inst.get_entity_statistics(node_type, start_time, end_time)
+    #     print(f"entity_statistics: {entity_statistics}")
+    #     result = ''
+    #     for index, item in enumerate(entity_statistics):
+    #         result += f"""[{index+1}] {item[f'{node_type}名稱']} 被提及了 {item['提及次數']
+    #                                                                  } 次, 情感比率為 {float(item['情感分數']/item['提及次數'])}\n"""
+    #     return result
+
+    # async def get_facet_statistics_for_function_call(facet_type: str = Any | None, start_time: datetime = Any | None, end_time: datetime = Any | None):
+    #     """
+    #     透過給定的 facet_type 來提取指定類型中所有構面的提及次數與情感分數。
+
+    #     Args:
+    #     facet_type (str): 欲查詢的構面類型，只能從以下兩個字詞中擇一填入，且必須完全一致（不得翻譯、拼錯或創造）："商品"、"服務"
+
+    #     Returns:
+    #     list[dict]: 一個含有構面類型、構面名稱、構面及次數、實體情感分數的列表
+    #     """
+    #     start_date = datetime.strptime(start_time, '%Y-%m-%d').date()
+    #     end_date = datetime.strptime(end_time, '%Y-%m-%d').date()
+    #     facet_statistics = await knowledge_graph_inst.get_facet_statistics(facet_type, start_date, end_date)
+    #     result = ''
+    #     for index, item in enumerate(facet_statistics):
+    #         result += f"[{index+1}] [{item[f'類型']}] {item[f'構面名稱']} 被提及了 {item['提及次數']
+    #                                                                       } 次 關注度為 {item[f'關注度']}, 情感比率為 {float(item['情感分數']/item['提及次數'])}\n"
+    #     return result
+
+    # async def get_facet_influence_for_function_call(facet_name: str):
+    #     """
+    #     透過給定的 facet_name 來提取產品在指定構面的影響力。
+
+    #     Args:
+    #     facet_name (str): 欲查詢的構面名稱
+
+    #     Returns:
+    #     list[dict]: 一個含有構面類型、構面名稱、構面及次數、實體情感分數的列表
+    #     """
+    #     facet_statistics = await knowledge_graph_inst.get_facet_statistics()
+    #     all_facet_names = []
+    #     for item in facet_statistics:
+    #         all_facet_names.append(item[f'構面名稱'])
+    #     query = f"""
+    #     使用者輸入的構面名稱是：「{facet_name}」
+
+    #     目前系統中所有構面名稱如下：
+    #     {all_facet_names}
+
+    #     請從上述構面中選出最相近的一項（可依語意或拼音相似度判斷）。
+    #     若完全找不到相關構面，請輸出「分析結果: 無相似構面」。
+
+    #     請務必**只輸出一行，格式如下**：
+    #     分析結果: 最相近構面名稱
+
+    #     ---範例---
+    #     分析結果: 口感
+    #     """
+    #     response = await use_model_func(
+    #         query,
+    #         tools=[],
+    #         functions=[],
+    #         system_prompt=sys_prompt,
+    #         stream=param.stream,
+    #     )
+    #     facet = ''
+    #     if "分析結果:" in response:
+    #         facet = response.split("分析結果:")[-1].strip()
+    #     print(f"目標構面: {facet}")
+    #     if facet in ['', '無相似構面']:
+    #         return "沒有相關資料"
+    #     entity_statistics = await knowledge_graph_inst.get_facet_influence(facet)
+    #     result = f'{facet} 構面中，影響力排序如下：\n'
+    #     for index, item in enumerate(entity_statistics):
+    #         result += f"[{index+1}] {item[f'商品']}： **影響力為 {item[f'影響力']}** ，被提及了 {
+    #             item['提及次數']} 次, 情感比率為 {float(item['情感分數']/item['提及次數'])} \n"
+    #     if result in [f'{facet} 構面中，影響力排序如下：\n', None]:
+    #         return "沒有相關資料"
+    #     return result
+
+    async def extract_time_ranges(time_ranges):
+        return time_ranges
+    available_functions = {
+        "extract_time_ranges": extract_time_ranges
+    }
+    prompt = """
+    你是一位專業的市場分析助手，請根據使用者提出的市場問題句子，萃取出其中所有涉及的時間區間，並輸出為標準格式以供 function 調用。
+
+    請務必輸出 JSON 格式，格式如下：
+    [
+        {{
+            "start_date": "YYYY-MM-DD",
+            "end_date": "YYYY-MM-DD"
+        }},
+        ...
+    ]
+
+    請特別注意：
+    - 欄位名稱必須為 start_date 和 end_date（請勿使用 start、from、date 等變形）
+    - 若句子中沒有明確指定時間，請預設為「近一個月」（今天往前推30天）
+    - 若有比較語意，請輸出多組時間區間（例如：上個月 vs 這個月）
+    - 日期格式請統一為 YYYY-MM-DD
+
+    今天日期是：{today}
+    使用者問題：{query}
+
+    """
+
+    funcall_prompt = prompt.format(
+        query=text,
+        today=datetime.today().date()
+    )
+
+    response = await use_model_func(
+        funcall_prompt,
+        tools=available_tools,
+        functions=available_functions,
+        system_prompt=sys_prompt,
+        stream=param.stream,
+    )
+    return response
+
+
+async def kg_query_plus_with_function_call(
+    query: str,
+    knowledge_graph_inst: BaseGraphStorage,
+    entities_vdb: BaseVectorStorage,
+    relationships_vdb: BaseVectorStorage,
+    text_chunks_db: BaseKVStorage,
+    query_param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+    system_prompt: str | None = None
+) -> str | AsyncIterator[str]:
+    use_model_func = global_config["llm_model_func"]
+    args_hash = compute_args_hash(query_param.mode, query, cache_type="query")
+    cached_response, quantized, min_val, max_val = await handle_cache(
+        hashing_kv, args_hash, query, query_param.mode, cache_type="query"
+    )
+    if cached_response is not None:
+        return cached_response
+
+    keywords = await extract_keywords_only_plus(
+        query, query_param, global_config, hashing_kv
+    )
+    function_call_results = await get_function_call_results(query, query_param, global_config, knowledge_graph_inst)
+    time_range_list = json.loads(function_call_results)
+    if keywords == []:
+        return PROMPTS["fail_response"]
+    keywords_str = ", ".join(keywords)
+    # Build context
+    context = await _build_query_context(
+        keywords_str,
+        "",
+        knowledge_graph_inst,
+        entities_vdb,
+        relationships_vdb,
+        text_chunks_db,
+        query_param,
+        time_range_list
+    )
+
+    if query_param.only_need_context:
+        return context
+    if context is None:
+        return PROMPTS["fail_response"]
+
+    # Process conversation history
+    history_context = ""
+    if query_param.conversation_history:
+        history_context = get_conversation_turns(
+            query_param.conversation_history, query_param.history_turns
+        )
+    sys_prompt_temp = system_prompt if system_prompt else PROMPTS["rag_response"]
+    sys_prompt = sys_prompt_temp.format(
+        context_data=context,
+        response_type=query_param.response_type,
+        history=history_context,
+    )
+    if query_param.only_need_prompt:
+        return sys_prompt
+
+    len_of_prompts = len(encode_string_by_tiktoken(query + sys_prompt))
+    logger.debug(f"[kg_query]Prompt Tokens: {len_of_prompts}")
+    response = await use_model_func(
+        query,
+        tools=[],
+        functions=[],
+        system_prompt=sys_prompt,
+        stream=query_param.stream,
+    )
+    if isinstance(response, str) and len(response) > len(sys_prompt):
+        response = (
+            response.replace(sys_prompt, "")
+            .replace("user", "")
+            .replace("model", "")
+            .replace(query, "")
+            .replace("<system>", "")
+            .replace("</system>", "")
+            .strip()
+        )
+
+    # Save to cache
+    await save_to_cache(
+        hashing_kv,
+        CacheData(
+            args_hash=args_hash,
+            content=response,
+            prompt=query,
+            quantized=quantized,
+            min_val=min_val,
+            max_val=max_val,
+            mode=query_param.mode,
+            cache_type="query",
+        ),
+    )
+    return response
+
+
+async def extract_keywords_only_plus(
+    text: str,
+    param: QueryParam,
+    global_config: dict[str, str],
+    hashing_kv: BaseKVStorage | None = None,
+) -> tuple[list[str], list[str]]:
+    """
+    Extract high-level and low-level keywords from the given 'text' using the LLM.
+    This method does NOT build the final RAG context or provide a final answer.
+    It ONLY extracts keywords (hl_keywords, ll_keywords).
+    """
+
+    # 1. Handle cache if needed - add cache type for keywords
+    args_hash = compute_args_hash(param.mode, text, cache_type="keywords")
+    cached_response, quantized, min_val, max_val = await handle_cache(
+        hashing_kv, args_hash, text, param.mode, cache_type="keywords"
+    )
+    if cached_response is not None:
+        try:
+            keywords_data = json.loads(cached_response)
+            return keywords_data["keywords"]
+        except (json.JSONDecodeError, KeyError):
+            logger.warning(
+                "Invalid cache format for keywords, proceeding with extraction"
+            )
+
+    # 2. Build the examples
+    example_number = global_config["addon_params"].get("example_number", None)
+    if example_number and example_number < len(PROMPTS["keywords_extraction_plus_examples"]):
+        examples = "\n".join(
+            PROMPTS["keywords_extraction_plus_examples"][: int(example_number)]
+        )
+    else:
+        examples = "\n".join(PROMPTS["keywords_extraction_plus_examples"])
+    language = global_config["addon_params"].get(
+        "language", PROMPTS["DEFAULT_LANGUAGE"]
+    )
+
+    # 3. Process conversation history
+    history_context = ""
+    if param.conversation_history:
+        history_context = get_conversation_turns(
+            param.conversation_history, param.history_turns
+        )
+
+    # 4. Build the keyword-extraction prompt
+    kw_prompt = PROMPTS["keywords_extraction_plus"].format(
+        query=text, examples=examples, language=language, history=history_context
+    )
+
+    len_of_prompts = len(encode_string_by_tiktoken(kw_prompt))
+    logger.debug(f"[kg_query]Prompt Tokens: {len_of_prompts}")
+
+    # 5. Call the LLM for keyword extraction
+    use_model_func = global_config["llm_model_func"]
+    result = await use_model_func(kw_prompt, tools=[], functions=[], keyword_extraction=True)
+    # 6. Parse out JSON from the LLM response
+    match = re.search(r"\{.*\}", result, re.DOTALL)
+    if not match:
+        logger.error("No JSON-like structure found in the LLM respond.")
+        return [], []
+    try:
+        keywords_data = json.loads(match.group(0))
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parsing error: {e}")
+        return [], []
+
+    keywords = keywords_data.get("keywords", [])
+    query_target_types = keywords_data.get("query_target_types", [])
+
+    # 7. Cache only the processed keywords with cache type
+    if keywords:
+        cache_data = {
+            "keywords": keywords
+        }
+        await save_to_cache(
+            hashing_kv,
+            CacheData(
+                args_hash=args_hash,
+                content=json.dumps(cache_data),
+                prompt=text,
+                quantized=quantized,
+                min_val=min_val,
+                max_val=max_val,
+                mode=param.mode,
+                cache_type="keywords",
+            ),
+        )
+    return keywords
 
 
 async def mix_kg_vector_query(
@@ -919,7 +1581,8 @@ async def mix_kg_vector_query(
             )
 
             if not hl_keywords and not ll_keywords:
-                logger.warning("Both high-level and low-level keywords are empty")
+                logger.warning(
+                    "Both high-level and low-level keywords are empty")
                 return None
 
             # Convert keyword lists to strings
@@ -1089,18 +1752,50 @@ async def _build_query_context(
     relationships_vdb: BaseVectorStorage,
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
+    time_ranges: list
 ):
     logger.info(f"Process {os.getpid()} buidling query context...")
     if query_param.mode == "local":
-        entities_context, relations_context, text_units_context = await _get_node_data(
+        entities_context, relations_context, text_units_context, entity_relation_summary_context = await _get_node_data(
             ll_keywords,
             knowledge_graph_inst,
             entities_vdb,
             text_chunks_db,
             query_param,
         )
+    elif query_param.mode == "local_plus":
+        results_by_time = []
+        for tr in time_ranges:
+            print(f"🔍 查詢時間區間：{tr['start_date']} ~ {tr['end_date']}")
+
+            entities_context, relations_context, text_units_context, entity_relation_summary_context = await _get_node_data(
+                ll_keywords,
+                knowledge_graph_inst,
+                entities_vdb,
+                text_chunks_db,
+                query_param,
+                tr  # ⬅️ 指定該段時間區間
+            )
+
+            # 跳過空結果
+            if not entities_context.strip() and not relations_context.strip():
+                continue
+
+            results_by_time.append({
+                "time_range": f"{tr['start_date']} ~ {tr['end_date']}",
+                "entity_summary": entity_relation_summary_context,
+                "text_units": text_units_context
+            })
+        # entities_context, relations_context, text_units_context, entity_relation_summary_context = await _get_node_data(
+        #     ll_keywords,
+        #     knowledge_graph_inst,
+        #     entities_vdb,
+        #     text_chunks_db,
+        #     query_param,
+        #     time_ranges[0]
+        # )
     elif query_param.mode == "global":
-        entities_context, relations_context, text_units_context = await _get_edge_data(
+        entities_context, relations_context, text_units_context, entity_relation_summary_context = await _get_edge_data(
             hl_keywords,
             knowledge_graph_inst,
             relationships_vdb,
@@ -1145,22 +1840,39 @@ async def _build_query_context(
     # not necessary to use LLM to generate a response
     if not entities_context.strip() and not relations_context.strip():
         return None
+    # # MARK// 最終結果輸出
+    # result = f"""
+    # -----查詢實體與語意總結-----
+    # {entity_relation_summary_context}
+    # -----相關評論-----
+    # {text_units_context}
+    # """.strip()
+    # # -----來源評論-----
+    # print(result)
+    # return result
+    # 若全部時間區間都查無結果，回傳 None
+    if not results_by_time:
+        return None
 
-    result = f"""
-    -----Entities-----
-    ```csv
-    {entities_context}
-    ```
-    -----Relationships-----
-    ```csv
-    {relations_context}
-    ```
-    -----Sources-----
-    ```csv
-    {text_units_context}
-    ```
+    result_parts = []
+
+    for r in results_by_time:
+        section = f"""
+    🕒【時間區間】：{r['time_range']}
+
+    -----實體與語意總結-----
+    {r['entity_summary']}
+
+    -----相關評論-----
+    {r['text_units']}
     """.strip()
-    return result
+        result_parts.append(section)
+
+    # 用分隔線區分不同時間段的結果
+    final_result = "\n\n==============================\n\n".join(result_parts)
+    print(final_result)
+
+    return final_result
 
 
 async def _get_node_data(
@@ -1169,6 +1881,7 @@ async def _get_node_data(
     entities_vdb: BaseVectorStorage,
     text_chunks_db: BaseKVStorage,
     query_param: QueryParam,
+    time_range: dict
 ):
     # get similar entities
     logger.info(
@@ -1179,12 +1892,18 @@ async def _get_node_data(
         query, top_k=query_param.top_k, ids=query_param.ids
     )
 
+    print(f"_get_node_data: {time_range}")
+    start_date = datetime.strptime(time_range['start_date'], "%Y-%m-%d").date()
+    end_date = datetime.strptime(time_range['end_date'], "%Y-%m-%d").date()
     if not len(results):
         return "", "", ""
+    # for r in results:
+    #     print(f"{query} --> {r["entity_name"]} DISTANCE:{r["distance"]}")
+
     # get entity information
     node_datas, node_degrees = await asyncio.gather(
         asyncio.gather(
-            *[knowledge_graph_inst.get_node(r["entity_name"]) for r in results]
+            *[knowledge_graph_inst.get_node(r["entity_name"], start_date, end_date) for r in results]
         ),
         asyncio.gather(
             *[knowledge_graph_inst.node_degree(r["entity_name"]) for r in results]
@@ -1198,17 +1917,20 @@ async def _get_node_data(
         {**n, "entity_name": k["entity_name"], "rank": d}
         for k, n, d in zip(results, node_datas, node_degrees)
         if n is not None
-    ]  # what is this text_chunks_db doing.  dont remember it in airvx.  check the diagram.
+    ]
+    # what is this text_chunks_db doing.  dont remember it in airvx.  check the diagram.
     # get entitytext chunk
     use_text_units, use_relations = await asyncio.gather(
-        _find_most_related_text_unit_from_entities(
-            node_datas, query_param, text_chunks_db, knowledge_graph_inst
+        # _find_most_related_text_unit_from_entities(
+        #     node_datas, query_param, text_chunks_db, knowledge_graph_inst
+        # ),
+        _find_incoming_chunk_texts_from_nodes(
+            node_datas, query_param, text_chunks_db, knowledge_graph_inst, start_date, end_date
         ),
         _find_most_related_edges_from_entities(
-            node_datas, query_param, knowledge_graph_inst
+            node_datas, query_param, knowledge_graph_inst, start_date, end_date
         ),
     )
-
     len_node_datas = len(node_datas)
     node_datas = truncate_list_by_token_size(
         node_datas,
@@ -1227,28 +1949,42 @@ async def _get_node_data(
     entites_section_list = [
         [
             "id",
-            "entity",
-            "type",
-            "description",
-            "rank",
-            "created_at",
+            "實體名稱",
+            "實體類型",
+            "實體描述",
+            "提及次數",
+            "情感分數",
         ]
     ]
     for i, n in enumerate(node_datas):
         created_at = n.get("created_at", "UNKNOWN")
         if isinstance(created_at, (int, float)):
-            created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+            created_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         entites_section_list.append(
             [
                 i,
                 n["entity_name"],
                 n.get("entity_type", "UNKNOWN"),
                 n.get("description", "UNKNOWN"),
-                n["rank"],
-                created_at,
+                n.get("mention_count", 0),
+                n.get("sentiment_score", 0),
             ]
         )
-    entities_context = list_of_list_to_csv(entites_section_list)
+    # entities_context = list_of_list_to_csv(entites_section_list)
+    entity_descriptions = []
+    for i, n in enumerate(node_datas):
+        created_at = n.get("created_at", "UNKNOWN")
+        if isinstance(created_at, (int, float)):
+            created_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+        entity_descriptions.append(
+            f"{i+1}. **{n['entity_name']}**（{n.get('entity_type', '未知類型')}）\n"
+            f"　{n.get('description', '無描述')}根據評論資料， **{n['entity_name']}** 共被提及 **{n.get('mention_count', 0)} 次**，"
+            f"情感分數為 **{n.get('sentiment_score', 0)}**\n"
+        )
+
+    entities_context = "\n".join(entity_descriptions)
 
     relations_section_list = [
         [
@@ -1266,7 +2002,8 @@ async def _get_node_data(
         created_at = e.get("created_at", "UNKNOWN")
         # Convert timestamp to readable format
         if isinstance(created_at, (int, float)):
-            created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+            created_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         relations_section_list.append(
             [
                 i,
@@ -1275,17 +2012,85 @@ async def _get_node_data(
                 e["description"],
                 e["keywords"],
                 e["weight"],
-                e["rank"],
                 created_at,
             ]
         )
+
     relations_context = list_of_list_to_csv(relations_section_list)
 
-    text_units_section_list = [["id", "content"]]
+    text_units_descriptions = []
     for i, t in enumerate(use_text_units):
-        text_units_section_list.append([i, t["content"]])
-    text_units_context = list_of_list_to_csv(text_units_section_list)
-    return entities_context, relations_context, text_units_context
+        text_units_descriptions.append(
+            f"【{i+1}】來自「{t['entity_name']}」的段落：\n「{t['content']}」\n"
+        )
+    text_units_context = "\n".join(text_units_descriptions)
+    entity_relation_summary_context = build_entity_relation_summary(
+        use_relations)
+    return entities_context, relations_context, text_units_context, entity_relation_summary_context
+
+
+def build_entity_relation_summary(use_relations: list[dict]) -> str:
+    from collections import defaultdict
+
+    # 第一層聚合：來源 → [構面]
+    graph = defaultdict(lambda: {
+        "type": "UNKNOWN",
+        "mention_count": 0,
+        "sentiment_score": 0,
+        "facets": defaultdict(lambda: {
+            "mention_count": 0,
+            "sentiment_score": 0,
+        })
+    })
+
+    for rel in use_relations:
+        src = rel.get("src_node")
+        tgt = rel.get("tgt_node")
+        src_degree = rel.get("rank")
+        if not src or not tgt:
+            continue
+
+        src_name = src.get("entity_id")
+        tgt_name = tgt.get("entity_id")
+
+        # 來源資訊
+        if graph[src_name]["mention_count"] == 0:
+            graph[src_name]["type"] = src.get("entity_type", "未知類型")
+            graph[src_name]["mention_count"] = src.get("mention_count", 0)
+            graph[src_name]["sentiment_score"] = src.get("sentiment_score", 0)
+
+        # 構面資訊
+        graph[src_name]["facets"][tgt_name]["mention_count"] = tgt.get(
+            "mention_count", 0)
+        graph[src_name]["facets"][tgt_name]["sentiment_score"] = tgt.get(
+            "sentiment_score", 0)
+
+    # ⬇️ 組裝輸出
+    output = []
+    for src_name, data in graph.items():
+        if (data['type'] == "構面" and data['mention_count'] > 0):
+            output.append(
+                f"🔸 **{src_name}**（{data['type']}）被提及了 {data['mention_count']} 次，情感比率 {float(data['sentiment_score']/data['mention_count'])}，其中："
+            )
+        elif (data['mention_count'] > 0):
+            output.append(
+                f"🔸 **{src_name}**（{data['type']}）被提及了 {data['mention_count']} 次，情感比率 {float(data['sentiment_score']/data['mention_count'])}，其中："
+            )
+        else:
+            print(f"1992 就是{src_name}的提及次數 = {data['mention_count']}")
+        for facet_name, f in data["facets"].items():
+            # ⬇️ 如果 facet_name 是像「裕珍馨_商品」，就去掉「裕珍馨_」
+            if facet_name.startswith(src_name + "_"):
+                display_facet_name = facet_name[len(src_name) + 1:]
+            else:
+                display_facet_name = facet_name
+            if (f['mention_count'] > 0):
+                output.append(
+                    f"  - {display_facet_name}（{f['mention_count']} 次 / {float(f['sentiment_score']/f['mention_count'])}）"
+                )
+        output.append("")  # 空行區隔
+
+    return "\n".join(output)
 
 
 async def _find_most_related_text_unit_from_entities(
@@ -1314,7 +2119,8 @@ async def _find_most_related_text_unit_from_entities(
 
     # Add null check for node data
     all_one_hop_text_units_lookup = {
-        k: set(split_string_by_multi_markers(v["source_id"], [GRAPH_FIELD_SEP]))
+        k: set(split_string_by_multi_markers(
+            v["source_id"], [GRAPH_FIELD_SEP]))
         for k, v in zip(all_one_hop_nodes, all_one_hop_nodes_data)
         if v is not None and "source_id" in v  # Add source_id check
     }
@@ -1372,39 +2178,62 @@ async def _find_most_related_text_unit_from_entities(
         f"Truncate chunks from {len(all_text_units_lookup)} to {len(all_text_units)} (max tokens:{query_param.max_token_for_text_unit})"
     )
 
-    all_text_units = [t["data"] for t in all_text_units]
-    return all_text_units
+    # all_text_units = [t["data"] for t in all_text_units]
+    # return all_text_units
+    return [
+        {
+            "id": t["id"],
+            "content": t["data"]["content"],
+            "entity_name": node_datas[t["order"]]["entity_name"]
+        }
+        for t in all_text_units
+    ]
 
 
 async def _find_most_related_edges_from_entities(
     node_datas: list[dict],
     query_param: QueryParam,
     knowledge_graph_inst: BaseGraphStorage,
+    start_date: datetime.date,
+    end_date: datetime.date
 ):
     all_related_edges = await asyncio.gather(
-        *[knowledge_graph_inst.get_node_edges(dp["entity_name"]) for dp in node_datas]
+        *[knowledge_graph_inst.get_node_edges(dp["entity_name"], start_date, end_date) for dp in node_datas]
     )
     all_edges = []
     seen = set()
 
     for this_edges in all_related_edges:
-        for e in this_edges:
-            sorted_edge = tuple(sorted(e))
+        for sorted_edge in this_edges:
             if sorted_edge not in seen:
                 seen.add(sorted_edge)
                 all_edges.append(sorted_edge)
 
-    all_edges_pack, all_edges_degree = await asyncio.gather(
-        asyncio.gather(*[knowledge_graph_inst.get_edge(e[0], e[1]) for e in all_edges]),
+    # 🟡 同步查詢邊、source節點、target節點
+    all_edges_pack, src_nodes, tgt_nodes, node_degree = await asyncio.gather(
+        asyncio.gather(*[knowledge_graph_inst.get_edge(e[0], e[1])
+                       for e in all_edges]),
+        asyncio.gather(*[knowledge_graph_inst.get_node(e[0], start_date, end_date)
+                       for e in all_edges]),
+        asyncio.gather(*[knowledge_graph_inst.get_node(e[1], start_date, end_date, root_id=e[0])
+                       for e in all_edges]),  # 🆕 新增查 target node
         asyncio.gather(
-            *[knowledge_graph_inst.edge_degree(e[0], e[1]) for e in all_edges]
+            *[knowledge_graph_inst.node_degree(e[0]) for e in all_edges]
         ),
     )
-    all_edges_data = [
-        {"src_tgt": k, "rank": d, **v}
-        for k, v, d in zip(all_edges, all_edges_pack, all_edges_degree)
-        if v is not None
-    ]
+
+    # 🔵 整合邊與 source/target 節點資訊
+    all_edges_data = []
+    for k, v, src_node, tgt_node, d in zip(all_edges, all_edges_pack, src_nodes, tgt_nodes, node_degree):
+        if v is None:
+            continue
+        all_edges_data.append({
+            "src_tgt": k,
+            "rank": d,
+            "src_node": src_node,  # 🆕 可選：附上來源節點資料
+            "tgt_node": tgt_node,  # 🆕 附上目標節點（鄰居）資料
+            **v
+        })
     all_edges_data = sorted(
         all_edges_data, key=lambda x: (x["rank"], x["weight"]), reverse=True
     )
@@ -1413,11 +2242,9 @@ async def _find_most_related_edges_from_entities(
         key=lambda x: x["description"] if x["description"] is not None else "",
         max_token_size=query_param.max_token_for_global_context,
     )
-
     logger.debug(
         f"Truncate relations from {len(all_edges)} to {len(all_edges_data)} (max tokens:{query_param.max_token_for_global_context})"
     )
-
     return all_edges_data
 
 
@@ -1439,27 +2266,27 @@ async def _get_edge_data(
     if not len(results):
         return "", "", ""
 
-    edge_datas, edge_degree = await asyncio.gather(
-        asyncio.gather(
-            *[knowledge_graph_inst.get_edge(r["src_id"], r["tgt_id"]) for r in results]
-        ),
-        asyncio.gather(
-            *[
-                knowledge_graph_inst.edge_degree(r["src_id"], r["tgt_id"])
-                for r in results
-            ]
-        ),
+   # 取得邊資料
+    edge_datas = await asyncio.gather(
+        *[knowledge_graph_inst.get_edge(r["src_id"], r["tgt_id"]) for r in results]
+    )
+    edge_datas = [e for e in edge_datas if e is not None and e.get(
+        "source_id") is not None]
+
+    # 取得來源節點的 mention_count
+    src_nodes = await asyncio.gather(
+        *[knowledge_graph_inst.get_node(r["src_id"]) for r in results]
     )
 
     edge_datas = [
         {
             "src_id": k["src_id"],
             "tgt_id": k["tgt_id"],
-            "rank": d,
+            "rank": src_node.get("mention_count", 0) if src_node else 0,
             "created_at": k.get("__created_at__", None),
             **v,
         }
-        for k, v, d in zip(results, edge_datas, edge_degree)
+        for k, v, src_node in zip(results, edge_datas, src_nodes)
         if v is not None
     ]
     edge_datas = sorted(
@@ -1498,7 +2325,8 @@ async def _get_edge_data(
         created_at = e.get("created_at", "Unknown")
         # Convert timestamp to readable format
         if isinstance(created_at, (int, float)):
-            created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+            created_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         relations_section_list.append(
             [
                 i,
@@ -1513,20 +2341,21 @@ async def _get_edge_data(
         )
     relations_context = list_of_list_to_csv(relations_section_list)
 
-    entites_section_list = [["id", "entity", "type", "description", "rank"]]
+    entites_section_list = [["id", "實體名稱", "實體類型", "實體描述", "提及次數", "情感分數"]]
     for i, n in enumerate(use_entities):
         created_at = e.get("created_at", "Unknown")
         # Convert timestamp to readable format
         if isinstance(created_at, (int, float)):
-            created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+            created_at = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(created_at))
         entites_section_list.append(
             [
                 i,
                 n["entity_name"],
                 n.get("entity_type", "UNKNOWN"),
                 n.get("description", "UNKNOWN"),
-                n["rank"],
-                created_at,
+                n.get("mention_count", 0),
+                n.get("sentiment_score", 0)
             ]
         )
     entities_context = list_of_list_to_csv(entites_section_list)
@@ -1568,6 +2397,7 @@ async def _find_most_related_entities_from_relationships(
             ]
         ),
     )
+    node_datas = [e for e in node_datas if e and e.get("source_id")]
     node_datas = [
         {**n, "entity_name": k, "rank": d}
         for k, n, d in zip(entity_names, node_datas, node_degrees)
@@ -1586,6 +2416,38 @@ async def _find_most_related_entities_from_relationships(
     return node_datas
 
 
+async def _find_incoming_chunk_texts_from_nodes(
+    node_datas: list[dict],
+    query_param: QueryParam,
+    text_chunks_db: BaseKVStorage,
+    knowledge_graph_inst: BaseGraphStorage,
+    start_date: datetime.date,
+    end_date: datetime.date
+):
+    edge_datas = []
+
+    for node in node_datas:
+        entity_id = node["entity_id"]
+
+        src_node = await knowledge_graph_inst.get_node(entity_id, start_date, end_date)
+
+        if not src_node:
+            continue
+
+        # ✅ 改這裡：從 source_ids 取出多筆 chunk
+        if "source_ids" in src_node and isinstance(src_node["source_ids"], list):
+            for chunk_id in src_node["source_ids"]:
+                edge_datas.append(
+                    {"entity_name": entity_id, "source_id": chunk_id})
+
+    return await _find_related_text_unit_from_relationships(
+        edge_datas=edge_datas,
+        query_param=query_param,
+        text_chunks_db=text_chunks_db,
+        knowledge_graph_inst=knowledge_graph_inst
+    )
+
+
 async def _find_related_text_unit_from_relationships(
     edge_datas: list[dict],
     query_param: QueryParam,
@@ -1598,6 +2460,15 @@ async def _find_related_text_unit_from_relationships(
     ]
     all_text_units_lookup = {}
 
+    # 🔧 建立一個 chunk_id → entity_name 的對應表
+    chunk_to_entity = {}
+    for dp in edge_datas:
+        entity_name = dp["entity_name"]
+        chunk_ids = split_string_by_multi_markers(
+            dp["source_id"], [GRAPH_FIELD_SEP])
+        for c_id in chunk_ids:
+            chunk_to_entity[c_id] = entity_name
+
     async def fetch_chunk_data(c_id, index):
         if c_id not in all_text_units_lookup:
             chunk_data = await text_chunks_db.get_by_id(c_id)
@@ -1606,6 +2477,7 @@ async def _find_related_text_unit_from_relationships(
                 all_text_units_lookup[c_id] = {
                     "data": chunk_data,
                     "order": index,
+                    "entity_name": chunk_to_entity.get(c_id, None),
                 }
 
     tasks = []
@@ -1641,7 +2513,14 @@ async def _find_related_text_unit_from_relationships(
         f"Truncate chunks from {len(valid_text_units)} to {len(truncated_text_units)} (max tokens:{query_param.max_token_for_text_unit})"
     )
 
-    all_text_units: list[TextChunkSchema] = [t["data"] for t in truncated_text_units]
+    all_text_units: list[TextChunkSchema] = [
+        {
+            **t["data"],
+            "entity_name": t.get("entity_name")  # 🆕 最後加進去
+        }
+        for t in truncated_text_units
+    ]
+    print(all_text_units)
 
     return all_text_units
 
@@ -1715,7 +2594,8 @@ async def naive_query(
         f"Truncate chunks from {len(chunks)} to {len(maybe_trun_chunks)} (max tokens:{query_param.max_token_for_text_unit})"
     )
 
-    section = "\n--New Chunk--\n".join([c["content"] for c in maybe_trun_chunks])
+    section = "\n--New Chunk--\n".join([c["content"]
+                                       for c in maybe_trun_chunks])
 
     if query_param.only_need_context:
         return section
@@ -1733,7 +2613,6 @@ async def naive_query(
         response_type=query_param.response_type,
         history=history_context,
     )
-
     if query_param.only_need_prompt:
         return sys_prompt
 
@@ -1747,7 +2626,7 @@ async def naive_query(
 
     if len(response) > len(sys_prompt):
         response = (
-            response[len(sys_prompt) :]
+            response[len(sys_prompt):]
             .replace(sys_prompt, "")
             .replace("user", "")
             .replace("model", "")
@@ -1817,10 +2696,12 @@ async def kg_query_with_keywords(
         )
         return PROMPTS["fail_response"]
     if not ll_keywords and query_param.mode in ["local", "hybrid"]:
-        logger.warning("low_level_keywords is empty, switching to global mode.")
+        logger.warning(
+            "low_level_keywords is empty, switching to global mode.")
         query_param.mode = "global"
     if not hl_keywords and query_param.mode in ["global", "hybrid"]:
-        logger.warning("high_level_keywords is empty, switching to local mode.")
+        logger.warning(
+            "high_level_keywords is empty, switching to local mode.")
         query_param.mode = "local"
 
     # Flatten low-level and high-level keywords if needed
@@ -1875,7 +2756,6 @@ async def kg_query_with_keywords(
         response_type=query_param.response_type,
         history=history_context,
     )
-
     if query_param.only_need_prompt:
         return sys_prompt
 

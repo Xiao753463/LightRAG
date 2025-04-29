@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime
 from enum import Enum
 import os
 from dotenv import load_dotenv
@@ -8,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import (
     Any,
     Literal,
+    Optional,
     TypedDict,
     TypeVar,
 )
@@ -56,7 +58,8 @@ class QueryParam:
     top_k: int = int(os.getenv("TOP_K", "60"))
     """Number of top items to retrieve. Represents entities in 'local' mode and relationships in 'global' mode."""
 
-    max_token_for_text_unit: int = int(os.getenv("MAX_TOKEN_TEXT_CHUNK", "4000"))
+    max_token_for_text_unit: int = int(
+        os.getenv("MAX_TOKEN_TEXT_CHUNK", "4000"))
     """Maximum number of tokens allowed for each retrieved text chunk."""
 
     max_token_for_global_context: int = int(
@@ -64,7 +67,8 @@ class QueryParam:
     )
     """Maximum number of tokens allocated for relationship descriptions in global retrieval."""
 
-    max_token_for_local_context: int = int(os.getenv("MAX_TOKEN_ENTITY_DESC", "4000"))
+    max_token_for_local_context: int = int(
+        os.getenv("MAX_TOKEN_ENTITY_DESC", "4000"))
     """Maximum number of tokens allocated for entity descriptions in local retrieval."""
 
     hl_keywords: list[str] = field(default_factory=list)
@@ -194,7 +198,7 @@ class BaseGraphStorage(StorageNameSpace, ABC):
         """Get a node by its id."""
 
     @abstractmethod
-    async def get_node(self, node_id: str) -> dict[str, str] | None:
+    async def get_node(self, node_id: str, query_start: Optional[datetime], query_end: Optional[datetime], root_id: str) -> dict[str, str] | None:
         """Get an edge by its source and target node ids."""
 
     @abstractmethod
@@ -204,8 +208,27 @@ class BaseGraphStorage(StorageNameSpace, ABC):
         """Get all edges connected to a node."""
 
     @abstractmethod
-    async def get_node_edges(self, source_node_id: str) -> list[tuple[str, str]] | None:
+    async def get_node_edges(self, source_node_id: str, query_start: Optional[datetime], query_end: Optional[datetime]) -> list[tuple[str, str]] | None:
         """Upsert a node into the graph."""
+
+    @abstractmethod
+    async def get_entity_statistics(self, entity_type: str, query_start: str, query_end: str) -> list[dict]:
+        """get get_entity_statistics by its entity_type."""
+
+    @abstractmethod
+    async def get_facet_statistics(self, facet_type: str | None, query_start: Optional[datetime.datetime], query_end: Optional[datetime.datetime]) -> list[dict]:
+        """get get_facet_statistics by its facet_type."""
+    @abstractmethod
+    async def get_facet_influence(self, facet_name: str | None) -> list[dict]:
+        """get the influence of each product in a certain dimension."""
+
+    @abstractmethod
+    async def get_existing_mention_count(self, node_id: str, node_data: dict[str, str]) -> int:
+        """get mention_count by its source and target node ids."""
+
+    @abstractmethod
+    async def get_existing_sentiment_score(self, node_id: str, entity_type: str) -> int:
+        """get sentiment_score by its source and target node ids."""
 
     @abstractmethod
     async def upsert_node(self, node_id: str, node_data: dict[str, str]) -> None:

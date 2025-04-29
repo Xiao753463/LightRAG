@@ -31,7 +31,7 @@ from lightrag.api import __api_version__
 
 import numpy as np
 from typing import Union
-
+available_functions = {}
 
 @retry(
     stop=stop_after_attempt(3),
@@ -40,9 +40,11 @@ from typing import Union
         (RateLimitError, APIConnectionError, APITimeoutError)
     ),
 )
+
 async def _ollama_model_if_cache(
     model,
-    prompt,
+    prompt, 
+    tools,
     system_prompt=None,
     history_messages=[],
     **kwargs,
@@ -67,8 +69,35 @@ async def _ollama_model_if_cache(
         messages.append({"role": "system", "content": system_prompt})
     messages.extend(history_messages)
     messages.append({"role": "user", "content": prompt})
+    response = await ollama_client.chat(model=model, messages=messages,tools=tools, **kwargs)
+    if response.message.tool_calls:
+        # There may be multiple tool calls in the response
+        for tool in response.message.tool_calls:
+            # Ensure the function is available, and then call it
+            if function_to_call := available_functions.get(tool.function.name):
+                print('Calling function:', tool.function.name)
+                print('Arguments:', tool.function.arguments)
+                output = await function_to_call(**tool.function.arguments)
+                print('Function output:', output)
+                return output
+                if(output == "沒有相關資料"): return ''
+            else:
+                print('Function', tool.function.name, 'not found')
+                return ''
 
-    response = await ollama_client.chat(model=model, messages=messages, **kwargs)
+        # Only needed to chat with the model using the tool call results
+        if response.message.tool_calls:
+            # Add the function response to messages for the model to use
+            messages.append(response.message)
+            messages.append({'role': 'tool', 'content': str(output), 'name': tool.function.name})
+
+            # Get final response from model with function outputs
+            final_response = await ollama_client.chat(model=model, messages=messages)
+            print('Final response:', final_response.message.content)
+            model_response = final_response["message"]["content"]
+            return model_response
+        else:
+            print('No tool calls returned from model')
     if stream:
         """cannot cache stream response and process reasoning"""
 
@@ -79,7 +108,6 @@ async def _ollama_model_if_cache(
         return inner()
     else:
         model_response = response["message"]["content"]
-
         """
         If the model also wraps its thoughts in a specific tag,
         this information is not needed for the final
@@ -90,15 +118,18 @@ async def _ollama_model_if_cache(
 
 
 async def ollama_model_complete(
-    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+    prompt, tools, functions, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> Union[str, AsyncIterator[str]]:
     keyword_extraction = kwargs.pop("keyword_extraction", None)
     if keyword_extraction:
         kwargs["format"] = "json"
     model_name = kwargs["hashing_kv"].global_config["llm_model_name"]
+    global available_functions
+    available_functions = functions
     return await _ollama_model_if_cache(
         model_name,
         prompt,
+        tools,
         system_prompt=system_prompt,
         history_messages=history_messages,
         **kwargs,
