@@ -1,115 +1,126 @@
+from datetime import datetime
 import os
-from lightrag import LightRAG
-from lightrag.llm.openai import gpt_4o_mini_complete
-#########
-# Uncomment the below two lines if running in a jupyter notebook to handle the async nature of rag.insert()
-# import nest_asyncio
-# nest_asyncio.apply()
-#########
+import numpy as np
+import pandas as pd
+from collections import defaultdict
 
-WORKING_DIR = "./custom_kg"
+from lightrag import LightRAG
+from lightrag.llm.ollama import ollama_model_complete
+from lightrag.utils import EmbeddingFunc
+from sentence_transformers import SentenceTransformer
+
+WORKING_DIR = "./0330"
+os.environ["NEO4J_URI"] = "bolt://localhost:7687"
+os.environ["NEO4J_USERNAME"] = "753463"
+os.environ["NEO4J_PASSWORD"] = "forfun963741"
 
 if not os.path.exists(WORKING_DIR):
     os.mkdir(WORKING_DIR)
 
+model = SentenceTransformer("intfloat/multilingual-e5-large")
+async def embedding_func(texts: list[str]) -> np.ndarray:
+    embeddings = model.encode(texts, convert_to_numpy=True)
+    return embeddings
+
 rag = LightRAG(
     working_dir=WORKING_DIR,
-    llm_model_func=gpt_4o_mini_complete,  # Use gpt_4o_mini_complete LLM model
-    # llm_model_func=gpt_4o_complete  # Optionally, use a stronger model
+    llm_model_func=ollama_model_complete,
+    llm_model_name="llama3.1:8b-instruct-q5_K_M",
+    llm_model_max_async=4,
+    llm_model_max_token_size=32768,
+    llm_model_kwargs={
+        "host": "http://localhost:11434",
+        "options": {"num_ctx": 32768},
+    },
+    embedding_func=EmbeddingFunc(
+        embedding_dim=model.get_sentence_embedding_dimension(),
+        max_token_size=8192,
+        func=embedding_func,
+    ),
+    graph_storage="Neo4JStorage",
+    vector_storage="FaissVectorDBStorage",
+    vector_db_storage_cls_kwargs={
+        "cosine_better_than_threshold": 0.2
+    },
 )
 
-custom_kg = {
-    "entities": [
-        {
-            "entity_name": "CompanyA",
-            "entity_type": "Organization",
-            "description": "A major technology company",
-            "source_id": "Source1",
-        },
-        {
-            "entity_name": "ProductX",
-            "entity_type": "Product",
-            "description": "A popular product developed by CompanyA",
-            "source_id": "Source1",
-        },
-        {
-            "entity_name": "PersonA",
-            "entity_type": "Person",
-            "description": "A renowned researcher in AI",
-            "source_id": "Source2",
-        },
-        {
-            "entity_name": "UniversityB",
-            "entity_type": "Organization",
-            "description": "A leading university specializing in technology and sciences",
-            "source_id": "Source2",
-        },
-        {
-            "entity_name": "CityC",
-            "entity_type": "Location",
-            "description": "A large metropolitan city known for its culture and economy",
-            "source_id": "Source3",
-        },
-        {
-            "entity_name": "EventY",
-            "entity_type": "Event",
-            "description": "An annual technology conference held in CityC",
-            "source_id": "Source3",
-        },
-    ],
-    "relationships": [
-        {
-            "src_id": "CompanyA",
-            "tgt_id": "ProductX",
-            "description": "CompanyA develops ProductX",
-            "keywords": "develop, produce",
-            "weight": 1.0,
-            "source_id": "Source1",
-        },
-        {
-            "src_id": "PersonA",
-            "tgt_id": "UniversityB",
-            "description": "PersonA works at UniversityB",
-            "keywords": "employment, affiliation",
-            "weight": 0.9,
-            "source_id": "Source2",
-        },
-        {
-            "src_id": "CityC",
-            "tgt_id": "EventY",
-            "description": "EventY is hosted in CityC",
-            "keywords": "host, location",
-            "weight": 0.8,
-            "source_id": "Source3",
-        },
-    ],
-    "chunks": [
-        {
-            "content": "ProductX, developed by CompanyA, has revolutionized the market with its cutting-edge features.",
-            "source_id": "Source1",
-            "source_chunk_index": 0,
-        },
-        {
-            "content": "One outstanding feature of ProductX is its advanced AI capabilities.",
-            "source_id": "Source1",
-            "chunk_order_index": 1,
-        },
-        {
-            "content": "PersonA is a prominent researcher at UniversityB, focusing on artificial intelligence and machine learning.",
-            "source_id": "Source2",
-            "source_chunk_index": 0,
-        },
-        {
-            "content": "EventY, held in CityC, attracts technology enthusiasts and companies from around the globe.",
-            "source_id": "Source3",
-            "source_chunk_index": 0,
-        },
-        {
-            "content": "None",
-            "source_id": "UNKNOWN",
-            "source_chunk_index": 0,
-        },
-    ],
-}
+# 讀取 CSV 檔案
+file_path = "reviews.csv"  # 替換成你的檔案路徑
+df = pd.read_csv(file_path)
 
+custom_kg = {"chunks": [], "entities": [], "relationships": []}
+
+# 加入計數與情感加總機制
+entity_info_map = defaultdict(lambda: {
+    "count": 0,
+    "type": "",
+    "desc": "",
+    "sentiment_score": 0,
+    "source_ids": set()
+})
+
+# 解析每一筆評論資料
+for _, row in df.iterrows():
+    brand = row["Brand"]
+    store = row["Store"]
+    review_text = row["Review"]
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    source_id = f"review-{timestamp}-{_}"
+
+    objects = row["Extract"].split("\n")
+    topics = row["Topic"].split("\n")
+    maslow_levels = row["Maslow_Level"].split("\n")
+    sentiments = row["Sentiment"].split("\n")
+
+    custom_kg["chunks"].append({"content": review_text, "source_id": source_id})
+
+    for i in range(len(objects)):
+        obj_info = objects[i].split(" ")
+        if len(obj_info) < 2:
+            continue
+
+        obj_name = obj_info[0]
+        obj_description = obj_info[1]
+        topic = topics[i] if i < len(topics) else "未分類"
+        maslow = maslow_levels[i] if i < len(maslow_levels) else "未知"
+        sentiment = sentiments[i] if i < len(sentiments) else "未知"
+        sentiment_score = 1 if sentiment == "Positive" else -1 if sentiment == "Negative" else 0
+        # 累積屬性與情感分數
+        for name, etype, desc in [
+            (brand, "品牌", f"{brand} 是一家知名品牌。"),
+            (store, "分店", f"{store} 是 {brand} 的分店。"),
+            (obj_name, topic, obj_description),
+            (topic, "主題", f"這則評論涉及 {topic}。"),
+            (maslow, "需求層級", f"此內容與 {maslow} 需求相關。")
+        ]:
+            entity_info_map[name]["count"] += 1
+            entity_info_map[name]["type"] = etype
+            entity_info_map[name]["desc"] = desc
+            entity_info_map[name]["source_ids"].add(source_id)
+            entity_info_map[name]["sentiment_score"] += sentiment_score
+
+        # 關係（去除情感節點）
+        custom_kg["relationships"].extend([
+            {"src_id": brand, "tgt_id": store,"description": f"{brand} 經營 {store}。","keywords": "經營", "weight": 1.0, "source_id": source_id},
+            {"src_id": store, "tgt_id": topic, "description": f"{store} 提供 {topic} 。", "keywords": topic, "weight": 1.0, "source_id": source_id},
+            {"src_id": topic, "tgt_id": obj_name, "description": f"{topic} 包含 {obj_name}。", "keywords": "包含", "weight": 1.0, "source_id": source_id},
+            {"src_id": obj_name, "tgt_id": maslow, "description": f"{obj_name} 提供 {maslow} 需求。", "keywords": "提供", "weight": 1.0, "source_id": source_id}
+        ])
+
+print("----整合結果----")
+# 將整理好的實體資訊加入圖譜中
+for name, info in entity_info_map.items():
+    print("實體: ", name, "情感: ", info["sentiment_score"])
+    custom_kg["entities"].append({
+        "entity_name": name,
+        "entity_type": info["type"],
+        "description": info["desc"],
+        "mention_count": info["count"],
+        "sentiment_score": info["sentiment_score"],  # ✅ 累積情感分數
+        "source_id": "<SEP>".join(info["source_ids"])    # 多筆來源合併
+    })
+    print(custom_kg["entities"])
+
+# 寫入圖譜
 rag.insert_custom_kg(custom_kg)
+

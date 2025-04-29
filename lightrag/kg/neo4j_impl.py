@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import inspect
 import os
 import re
@@ -54,7 +55,8 @@ class Neo4JStorage(BaseGraphStorage):
         self._driver = None
         self._driver_lock = asyncio.Lock()
 
-        URI = os.environ.get("NEO4J_URI", config.get("neo4j", "uri", fallback=None))
+        URI = os.environ.get("NEO4J_URI", config.get(
+            "neo4j", "uri", fallback=None))
         USERNAME = os.environ.get(
             "NEO4J_USERNAME", config.get("neo4j", "username", fallback=None)
         )
@@ -76,13 +78,15 @@ class Neo4JStorage(BaseGraphStorage):
         CONNECTION_ACQUISITION_TIMEOUT = float(
             os.environ.get(
                 "NEO4J_CONNECTION_ACQUISITION_TIMEOUT",
-                config.get("neo4j", "connection_acquisition_timeout", fallback=30.0),
+                config.get(
+                    "neo4j", "connection_acquisition_timeout", fallback=30.0),
             ),
         )
         MAX_TRANSACTION_RETRY_TIME = float(
             os.environ.get(
                 "NEO4J_MAX_TRANSACTION_RETRY_TIME",
-                config.get("neo4j", "max_transaction_retry_time", fallback=30.0),
+                config.get("neo4j", "max_transaction_retry_time",
+                           fallback=30.0),
             ),
         )
         DATABASE = os.environ.get(
@@ -122,19 +126,22 @@ class Neo4JStorage(BaseGraphStorage):
                             )
                             raise e
                 except neo4jExceptions.AuthError as e:
-                    logger.error(f"Authentication failed for {database} at {URI}")
+                    logger.error(
+                        f"Authentication failed for {database} at {URI}")
                     raise e
                 except neo4jExceptions.ClientError as e:
                     if e.code == "Neo.ClientError.Database.DatabaseNotFound":
                         logger.info(
-                            f"{database} at {URI} not found. Try to create specified database.".capitalize()
+                            f"{database} at {URI} not found. Try to create specified database.".capitalize(
+                            )
                         )
                         try:
                             with _sync_driver.session() as session:
                                 session.run(
                                     f"CREATE DATABASE `{database}` IF NOT EXISTS"
                                 )
-                                logger.info(f"{database} at {URI} created".capitalize())
+                                logger.info(
+                                    f"{database} at {URI} created".capitalize())
                                 connected = True
                         except (
                             neo4jExceptions.ClientError,
@@ -151,7 +158,8 @@ class Neo4JStorage(BaseGraphStorage):
                                         "This Neo4j instance does not support creating databases. Try to use Neo4j Desktop/Enterprise version or DozerDB instead. Fallback to use the default database."
                                     )
                             if database is None:
-                                logger.error(f"Failed to create {database} at {URI}")
+                                logger.error(
+                                    f"Failed to create {database} at {URI}")
                                 raise e
 
                 if connected:
@@ -200,7 +208,8 @@ class Neo4JStorage(BaseGraphStorage):
                 await result.consume()  # Ensure result is fully consumed
                 return single_result["node_exists"]
             except Exception as e:
-                logger.error(f"Error checking node existence for {node_id}: {str(e)}")
+                logger.error(
+                    f"Error checking node existence for {node_id}: {str(e)}")
                 await result.consume()  # Ensure results are consumed even on error
                 raise
 
@@ -242,7 +251,7 @@ class Neo4JStorage(BaseGraphStorage):
                 await result.consume()  # Ensure results are consumed even on error
                 raise
 
-    async def get_node(self, node_id: str) -> dict[str, str] | None:
+    async def get_node(self, node_id: str, query_start: Optional[datetime.datetime] = None, query_end: Optional[datetime.datetime] = None, root_id: str = "") -> dict[str, str] | None:
         """Get node by its label identifier.
 
         Args:
@@ -260,8 +269,47 @@ class Neo4JStorage(BaseGraphStorage):
             database=self._DATABASE, default_access_mode="READ"
         ) as session:
             try:
-                query = "MATCH (n:base {entity_id: $entity_id}) RETURN n"
-                result = await session.run(query, entity_id=node_id)
+                print(f"GET NODE 時間: {query_start} ~ {query_end}")
+                record = await session.run(
+                    "MATCH (n:base {entity_id: $id}) RETURN n, n.entity_type AS type",
+                    id=node_id
+                )
+                node_record = await record.single()
+                if not node_record:
+                    return None
+                node = dict(node_record["n"])
+                entity_type = node_record["type"]
+                if query_start is None:
+                    query_start = datetime.datetime.today() - datetime.timedelta(days=30)
+                if query_end is None:
+                    query_end = datetime.datetime.today()
+
+                if entity_type == "構面":
+                    query = """MATCH (n:base {entity_id: $entity_id})
+                        MATCH (src)-[r]->(n)
+                        WHERE r.date >= date({date: $start_date}) AND r.date <= date({date: $end_date}) AND src.entity_id CONTAINS $root
+                        WITH n, r.source_id AS source_id, collect(r.sentiment_score) AS scores
+                        WITH n, source_id, reduce(s = 0.0, x IN scores | s + x) / size(scores) AS avg_score
+                        RETURN 
+                        n,
+                        collect(source_id) AS source_ids,
+                        count(source_id) AS mention_count,
+                        sum(avg_score) AS sentiment_score
+                        """
+                else:
+                    query = """MATCH (n:base {entity_id: $entity_id})
+                        MATCH (n)-[r]->(trg)
+                        WHERE r.date >= date({date: $start_date}) AND r.date <= date({date: $end_date}) AND trg.entity_id CONTAINS $root
+                        WITH n AS n, r.source_id AS source_id, collect(r.sentiment_score) AS scores
+                        WITH n, source_id, reduce(s = 0.0, x IN scores | s + x) / size(scores) AS avg_score
+                        RETURN 
+                        n,
+                        collect(source_id) AS source_ids,
+                        count(source_id) AS mention_count,
+                        sum(avg_score) AS sentiment_score
+
+                        """
+                result = await session.run(query, entity_id=node_id, start_date=query_start, end_date=query_end, root=root_id)
                 try:
                     records = await result.fetch(
                         2
@@ -272,8 +320,13 @@ class Neo4JStorage(BaseGraphStorage):
                             f"Multiple nodes found with label '{node_id}'. Using first node."
                         )
                     if records:
-                        node = records[0]["n"]
+                        record = records[0]
+                        node = record["n"]
                         node_dict = dict(node)
+                        node_dict["source_ids"] = record["source_ids"]
+                        node_dict["mention_count"] = record["mention_count"]
+                        node_dict["sentiment_score"] = record["sentiment_score"]
+
                         # Remove base label from labels list if it exists
                         if "labels" in node_dict:
                             node_dict["labels"] = [
@@ -281,7 +334,8 @@ class Neo4JStorage(BaseGraphStorage):
                                 for label in node_dict["labels"]
                                 if label != "base"
                             ]
-                        logger.debug(f"Neo4j query node {query} return: {node_dict}")
+                        logger.debug(
+                            f"Neo4j query node {query} return: {node_dict}")
                         return node_dict
                     return None
                 finally:
@@ -290,7 +344,7 @@ class Neo4JStorage(BaseGraphStorage):
                 logger.error(f"Error getting node for {node_id}: {str(e)}")
                 raise
 
-    async def node_degree(self, node_id: str) -> int:
+    async def node_degree(self, node_id: str, query_start: Optional[datetime.datetime] = None, query_end: Optional[datetime.datetime] = None) -> int:
         """Get the degree (number of relationships) of a node with the given label.
         If multiple nodes have the same label, returns the degree of the first node.
         If no node is found, returns 0.
@@ -309,12 +363,17 @@ class Neo4JStorage(BaseGraphStorage):
             database=self._DATABASE, default_access_mode="READ"
         ) as session:
             try:
+                if query_start is None:
+                    query_start = datetime.datetime.today() - datetime.timedelta(days=30)
+                if query_end is None:
+                    query_end = datetime.datetime.today()
                 query = """
                     MATCH (n:base {entity_id: $entity_id})
-                    OPTIONAL MATCH (n)-[r]-()
+                    OPTIONAL MATCH (n)-[r]->()
+                    Where r.date >= date({date: $start_date}) AND r.date <= date({date: $end_date})
                     RETURN COUNT(r) AS degree
                 """
-                result = await session.run(query, entity_id=node_id)
+                result = await session.run(query, entity_id=node_id, start_date=query_start, end_date=query_end)
                 try:
                     record = await result.single()
 
@@ -330,7 +389,8 @@ class Neo4JStorage(BaseGraphStorage):
                 finally:
                     await result.consume()  # Ensure result is fully consumed
             except Exception as e:
-                logger.error(f"Error getting node degree for {node_id}: {str(e)}")
+                logger.error(
+                    f"Error getting node degree for {node_id}: {str(e)}")
                 raise
 
     async def edge_degree(self, src_id: str, tgt_id: str) -> int:
@@ -444,7 +504,7 @@ class Neo4JStorage(BaseGraphStorage):
             )
             raise
 
-    async def get_node_edges(self, source_node_id: str) -> list[tuple[str, str]] | None:
+    async def get_node_edges(self, source_node_id: str, query_start: Optional[datetime.datetime] = None, query_end: Optional[datetime.datetime] = None) -> list[tuple[str, str]] | None:
         """Retrieves all edges (relationships) for a particular node identified by its label.
 
         Args:
@@ -463,33 +523,46 @@ class Neo4JStorage(BaseGraphStorage):
                 database=self._DATABASE, default_access_mode="READ"
             ) as session:
                 try:
+                    if query_start is None:
+                        query_start = datetime.datetime.today() - datetime.timedelta(days=30)
+                    if query_end is None:
+                        query_end = datetime.datetime.today()
                     query = """MATCH (n:base {entity_id: $entity_id})
-                            OPTIONAL MATCH (n)-[r]-(connected:base)
-                            WHERE connected.entity_id IS NOT NULL
-                            RETURN n, r, connected"""
-                    results = await session.run(query, entity_id=source_node_id)
+                            OPTIONAL MATCH (n)-[r1]->(connected1:base)
+                            WHERE NOT "構面" IN labels(n) AND connected1.entity_id IS NOT NULL
+
+                            OPTIONAL MATCH (n)<-[r2]-(connected2:base)
+                            WHERE "構面" IN labels(n) AND connected2.entity_id IS NOT NULL
+
+                            WITH 
+                            collect(CASE WHEN connected1 IS NOT NULL THEN {target: connected1, rel: r1} ELSE NULL END) +
+                            collect(CASE WHEN connected2 IS NOT NULL THEN {target: connected2, rel: r2} ELSE NULL END) AS all_edges, n
+
+                            RETURN 
+                            n,
+                            [edge IN all_edges WHERE edge IS NOT NULL | edge.target] AS connected,
+                            [edge IN all_edges WHERE edge IS NOT NULL | edge.rel] AS all_rels"""
+                    results = await session.run(query, entity_id=source_node_id, start_date=query_start, end_date=query_end)
 
                     edges = []
                     async for record in results:
                         source_node = record["n"]
-                        connected_node = record["connected"]
-
-                        # Skip if either node is None
-                        if not source_node or not connected_node:
+                        connected_nodes = record["connected"]  # 注意：這是 list
+                        # Skip if source node is None
+                        if not source_node or not connected_nodes:
                             continue
 
-                        source_label = (
-                            source_node.get("entity_id")
-                            if source_node.get("entity_id")
-                            else None
-                        )
-                        target_label = (
-                            connected_node.get("entity_id")
-                            if connected_node.get("entity_id")
-                            else None
-                        )
+                        source_label = source_node.get("entity_id")
+                        if not source_label:
+                            continue
 
-                        if source_label and target_label:
+                        for connected_node in connected_nodes:
+                            if not connected_node:
+                                continue
+                            target_label = connected_node.get("entity_id")
+                            if not target_label:
+                                continue
+
                             edges.append((source_label, target_label))
 
                     await results.consume()  # Ensure results are consumed
@@ -501,7 +574,8 @@ class Neo4JStorage(BaseGraphStorage):
                     await results.consume()  # Ensure results are consumed even on error
                     raise
         except Exception as e:
-            logger.error(f"Error in get_node_edges for {source_node_id}: {str(e)}")
+            logger.error(
+                f"Error in get_node_edges for {source_node_id}: {str(e)}")
             raise
 
     @retry(
@@ -516,6 +590,248 @@ class Neo4JStorage(BaseGraphStorage):
             )
         ),
     )
+    async def get_entity_statistics(self, entity_type: str, query_start: str = Any | None, query_end: str = Any | None) -> list[dict]:
+        async with self._driver.session(database=self._DATABASE, default_access_mode="READ") as session:
+            try:
+                print(f"start get_entity_statistics")
+                # if query_start is None:
+                query_start = (datetime.datetime.today() -
+                               datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+                # if query_end is None:
+                query_end = datetime.datetime.today().strftime('%Y-%m-%d')
+                entity_type = "商品"
+                query = f"""
+                    MATCH (n:`{entity_type}`)
+                    MATCH ()-[r]->(n)
+                    WHERE r.date >= date($start_date) AND r.date <= date($end_date)
+                    WITH n,
+                        count(r)                        AS cnt,
+                        sum(toFloat(r.sentiment_score)) AS sentiment
+                    RETURN 
+                        n.entity_id AS name,
+                        cnt AS count,
+                        sentiment
+                    ORDER BY cnt DESC
+                """
+                results = await session.run(query, start_date=query_start, end_date=query_end)
+                print(f"get_entity_statistics result: {results}")
+                entity_statistics = []
+                name_to_stat = {}  # 用來快速查找已存在的名稱
+                async for record in results:
+                    name = record["name"]
+                    count = record["count"]
+                    sentiment = record["sentiment"]
+                    # Skip if name is None
+                    if not name:
+                        continue
+
+                    name = name.split("_")[-1]
+
+                    if name in name_to_stat:
+                        # 若已存在，累加次數與情感分數
+                        name_to_stat[name]["提及次數"] += count
+                        name_to_stat[name]["情感分數"] += sentiment
+                    else:
+                        # 若不存在，新增並紀錄索引
+                        stat = {
+                            f"{entity_type}名稱": name,
+                            "提及次數": count,
+                            "情感分數": sentiment
+                        }
+                        name_to_stat[name] = stat
+                        entity_statistics.append(stat)
+
+                await results.consume()  # Ensure results are consumed
+
+                def myFunc(e):
+                    return e["提及次數"]
+                entity_statistics.sort(reverse=True, key=myFunc)
+                return entity_statistics
+            except Exception as e:
+                return []
+
+    async def get_facet_statistics(self, facet_type: str = Any | None, query_start: Optional[datetime.datetime] = None, query_end: Optional[datetime.datetime] = None) -> list[dict]:
+        async with self._driver.session(database=self._DATABASE, default_access_mode="READ") as session:
+            try:
+                if query_start is None:
+                    query_start = datetime.datetime.today() - datetime.timedelta(days=30)
+                if query_end is None:
+                    query_end = datetime.datetime.today()
+                query = """
+                    OPTIONAL MATCH (t:類型)-[]->(o)-[r]->(f:構面)
+                    OPTIONAL MATCH (t:類型)-[r]->(f3:構面)
+                    WITH COLLECT(DISTINCT[f.entity_id, t.entity_id, f.sentiment_score,r]) + 
+                        COLLECT(DISTINCT[f3.entity_id, t.entity_id, f3.sentiment_score,r]) AS all_facet_type_pairs
+
+                    UNWIND all_facet_type_pairs AS pair
+                    WITH pair[0] AS facet_id, pair[1] AS type_id, pair[2] AS sentiment, pair[3] AS rel
+                    WHERE facet_id IS NOT NULL AND type_id IS NOT NULL AND type_id CONTAINS '$type'  AND rel.date >= date({date: $start_date}) AND rel.date <= date({date: $end_date})
+                    RETURN facet_id, type_id AS `type`, count(*) AS c, sentiment
+                """
+                results = await session.run(query, type=facet_type, start_date=query_start, end_date=query_end)
+                entity_statistics = []
+                name_to_stat = {}
+                total_count = 0  # 累加總提及次數
+
+                async for record in results:
+                    name = record["name"]
+                    count = record["count"]
+                    sentiment = record["sentiment"]
+                    t_type = record["type"]
+                    t_type = t_type.split("_")[-1]
+
+                    if (facet_type == "商品" or facet_type == "服務") and (t_type != facet_type):
+                        continue
+                    if not name:
+                        continue
+
+                    name = name.split("_")[-1]
+
+                    if name in name_to_stat:
+                        name_to_stat[name]["提及次數"] += count
+                        name_to_stat[name]["情感分數"] += sentiment
+                    else:
+                        stat = {
+                            "類型": t_type,
+                            "構面名稱": name,
+                            "提及次數": count,
+                            "情感分數": sentiment
+                        }
+                        name_to_stat[name] = stat
+                        entity_statistics.append(stat)
+
+                await results.consume()
+
+                # 計算總提及次數
+                total_count = sum([item["提及次數"] for item in entity_statistics])
+
+                # 加入「關注度」
+                for item in entity_statistics:
+                    item["關注度"] = round(
+                        item["提及次數"] / total_count, 4) if total_count > 0 else 0.0
+
+                # 排序
+                entity_statistics.sort(reverse=True, key=lambda e: e["提及次數"])
+                return entity_statistics
+            except Exception as e:
+                return []
+
+    async def get_facet_influence(self, facet_name: str) -> list[dict]:
+        async with self._driver.session(database=self._DATABASE, default_access_mode="READ") as session:
+            try:
+                query = f"""
+                    MATCH (t:類型)-[]->(p:商品)-[r]->(f:構面)
+                    WHERE f.entity_id CONTAINS '{facet_name}'
+                    RETURN DISTINCT 
+                    p.entity_id AS product_id, 
+                    f.entity_id AS facet_name,
+                    f.sentiment_score AS sentiment, 
+                    f.mention_count AS mention_count
+                """
+                results = await session.run(query)
+                product_data = []
+
+                async for record in results:
+
+                    product_id = record["product_id"]
+                    sentiment = record["sentiment"] or 0.0
+                    mention_count = record["mention_count"] or 0
+                    product_data.append({
+                        "商品": product_id.split("_")[-1],
+                        "情感分數": sentiment,
+                        "提及次數": mention_count
+                    })
+
+                await results.consume()
+                if product_data.count == 0:
+                    return []
+                # 計算 max 值
+                max_sentiment = max([abs(item["情感分數"])
+                                    for item in product_data]) or 1.0
+                max_mention = max([item["提及次數"] for item in product_data]) or 1
+
+                # 計算 Fpc 影響力
+                for item in product_data:
+                    norm_rating = item["情感分數"] / \
+                        max_sentiment if max_sentiment else 0
+                    norm_mention = item["提及次數"] / \
+                        max_mention if max_mention else 0
+                    item["影響力"] = round(norm_rating * norm_mention, 4)
+
+                # 依影響力排序
+                product_data.sort(key=lambda x: x["影響力"], reverse=True)
+                return product_data
+
+            except Exception as e:
+                print("錯誤：", e)
+                return []
+
+    async def get_existing_mention_count(self, entity_id: str, entity_type: str) -> int:
+        async with self._driver.session(database=self._DATABASE, default_access_mode="READ") as session:
+            try:
+                query = f"""
+                    MATCH (n:{entity_type} {{entity_id: '{entity_id}'}})
+                    RETURN n.mention_count AS count
+                    """
+                result = await session.run(query)
+                try:
+                    record = await result.single()
+                    if not record:
+                        return 0
+                    if record and record["count"] is not None:
+                        return int(record["count"])
+                finally:
+                    await result.consume()  # Ensure result is fully consumed
+                return 0
+            except Exception as e:
+                return 0
+
+    async def get_existing_sentiment_score(self, entity_id: str, entity_type: str) -> int:
+        async with self._driver.session(database=self._DATABASE, default_access_mode="READ") as session:
+            try:
+                query = f"""
+                    MATCH (n:{entity_type} {{entity_id: '{entity_id}'}})
+                    RETURN n.sentiment_score AS score
+                    """
+                result = await session.run(query)
+                try:
+                    record = await result.single()
+                    if not record:
+                        return 0
+                    if record and record["score"] is not None:
+                        return int(record["score"])
+                finally:
+                    await result.consume()  # Ensure result is fully consumed
+                return 0
+            except Exception as e:
+                return 0
+        # async with self._driver.session(
+        #     database=self._DATABASE, default_access_mode="READ"
+        # ) as session:
+        #     try:
+        #         query = """
+        #             MATCH (n:base {entity_id: $entity_id})
+        #             OPTIONAL MATCH (n)-[r]-()
+        #             RETURN COUNT(r) AS degree
+        #         """
+        #         result = await session.run(query, entity_id=node_id)
+        #         try:
+        #             record = await result.single()
+
+        #             if not record:
+        #                 logger.warning(f"No node found with label '{node_id}'")
+        #                 return 0
+
+        #             degree = record["degree"]
+        #             logger.debug(
+        #                 "Neo4j query node degree for {node_id} return: {degree}"
+        #             )
+        #             return degree
+        #         finally:
+        #             await result.consume()  # Ensure result is fully consumed
+        #     except Exception as e:
+        #         logger.error(f"Error getting node degree for {node_id}: {str(e)}")
+        #         raise
     async def upsert_node(self, node_id: str, node_data: dict[str, str]) -> None:
         """
         Upsert a node in the Neo4j database.
@@ -528,7 +844,8 @@ class Neo4JStorage(BaseGraphStorage):
         entity_type = properties["entity_type"]
         entity_id = properties["entity_id"]
         if "entity_id" not in properties:
-            raise ValueError("Neo4j: node properties must contain an 'entity_id' field")
+            raise ValueError(
+                "Neo4j: node properties must contain an 'entity_id' field")
 
         try:
             async with self._driver.session(database=self._DATABASE) as session:
@@ -588,11 +905,9 @@ class Neo4JStorage(BaseGraphStorage):
                 async def execute_upsert(tx: AsyncManagedTransaction):
                     query = """
                     MATCH (source:base {entity_id: $source_entity_id})
-                    WITH source
                     MATCH (target:base {entity_id: $target_entity_id})
-                    MERGE (source)-[r:DIRECTED]-(target)
-                    SET r += $properties
-                    RETURN r, source, target
+                    CREATE (source)-[r:DIRECTED $properties]->(target)
+                    RETURN r, source, target 
                     """
                     result = await tx.run(
                         query,
@@ -602,6 +917,7 @@ class Neo4JStorage(BaseGraphStorage):
                     )
                     try:
                         records = await result.fetch(2)
+
                         if records:
                             logger.debug(
                                 f"Upserted edge from '{source_node_id}' to '{target_node_id}'"

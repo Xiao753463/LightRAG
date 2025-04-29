@@ -1,28 +1,35 @@
 import asyncio
 import nest_asyncio
+import numpy as np
 
 nest_asyncio.apply()
 import os
 import inspect
-import logging
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.ollama import ollama_model_complete, ollama_embed
 from lightrag.utils import EmbeddingFunc
 from lightrag.kg.shared_storage import initialize_pipeline_status
+from sentence_transformers import SentenceTransformer
 
-WORKING_DIR = "./dickens"
+WORKING_DIR = "./0330"
+os.environ["NEO4J_URI"] = "bolt://localhost:7687"
+os.environ["NEO4J_USERNAME"] = "753463"
+os.environ["NEO4J_PASSWORD"] = "forfun963741"
 
-logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.INFO)
 
 if not os.path.exists(WORKING_DIR):
     os.mkdir(WORKING_DIR)
 
+model = SentenceTransformer("intfloat/multilingual-e5-large")
+async def embedding_func(texts: list[str]) -> np.ndarray:
+    embeddings = model.encode(texts, convert_to_numpy=True)
+    return embeddings
 
 async def initialize_rag():
     rag = LightRAG(
         working_dir=WORKING_DIR,
         llm_model_func=ollama_model_complete,
-        llm_model_name="gemma2:2b",
+        llm_model_name="llama3.1:8b-instruct-q5_K_M",
         llm_model_max_async=4,
         llm_model_max_token_size=32768,
         llm_model_kwargs={
@@ -30,12 +37,15 @@ async def initialize_rag():
             "options": {"num_ctx": 32768},
         },
         embedding_func=EmbeddingFunc(
-            embedding_dim=768,
+            embedding_dim=model.get_sentence_embedding_dimension(),
             max_token_size=8192,
-            func=lambda texts: ollama_embed(
-                texts, embed_model="nomic-embed-text", host="http://localhost:11434"
-            ),
+            func=embedding_func,
         ),
+        graph_storage="Neo4JStorage",
+        vector_storage="FaissVectorDBStorage",
+        vector_db_storage_cls_kwargs={
+            "cosine_better_than_threshold": 0.2  # Your desired threshold
+        },
     )
 
     await rag.initialize_storages()
@@ -53,49 +63,46 @@ def main():
     # Initialize RAG instance
     rag = asyncio.run(initialize_rag())
 
-    # Insert example text
-    with open("./book.txt", "r", encoding="utf-8") as f:
-        rag.insert(f.read())
 
-    # Test different query modes
-    print("\nNaive Search:")
-    print(
-        rag.query(
-            "What are the top themes in this story?", param=QueryParam(mode="naive")
-        )
-    )
+    # # Test different query modes
+    # print("\nNaive Search:")
+    # print(
+    #     rag.query(
+    #         "評論對象中Sentiment比例如何?", param=QueryParam(mode="naive")
+    #     )
+    # )
 
     print("\nLocal Search:")
     print(
         rag.query(
-            "What are the top themes in this story?", param=QueryParam(mode="local")
+            "評論對象中Sentiment比例如何?", param=QueryParam(mode="local")
         )
     )
 
-    print("\nGlobal Search:")
-    print(
-        rag.query(
-            "What are the top themes in this story?", param=QueryParam(mode="global")
-        )
-    )
+    # print("\nGlobal Search:")
+    # print(
+    #     rag.query(
+    #         "消費者對於商品的看法如何?", param=QueryParam(mode="global")
+    #     )
+    # )
 
-    print("\nHybrid Search:")
-    print(
-        rag.query(
-            "What are the top themes in this story?", param=QueryParam(mode="hybrid")
-        )
-    )
+    # print("\nHybrid Search:")
+    # print(
+    #     rag.query(
+    #         "消費者對於商品的看法如何?", param=QueryParam(mode="hybrid")
+    #     )
+    # )
 
-    # stream response
-    resp = rag.query(
-        "What are the top themes in this story?",
-        param=QueryParam(mode="hybrid", stream=True),
-    )
+    # # stream response
+    # resp = rag.query(
+    #     "消費者對於商品的看法如何?",
+    #     param=QueryParam(mode="hybrid", stream=True),
+    # )
 
-    if inspect.isasyncgen(resp):
-        asyncio.run(print_stream(resp))
-    else:
-        print(resp)
+    # if inspect.isasyncgen(resp):
+    #     asyncio.run(print_stream(resp))
+    # else:
+    #     print(resp)
 
 
 if __name__ == "__main__":

@@ -5,81 +5,81 @@ GRAPH_FIELD_SEP = "<SEP>"
 
 PROMPTS: dict[str, Any] = {}
 
-PROMPTS["DEFAULT_LANGUAGE"] = "English"
+PROMPTS["DEFAULT_LANGUAGE"] = "繁體中文"
 PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|>"
 PROMPTS["DEFAULT_RECORD_DELIMITER"] = "##"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 
-PROMPTS["DEFAULT_ENTITY_TYPES"] = ["organization", "person", "geo", "event", "category"]
+PROMPTS["DEFAULT_ENTITY_TYPES"] = ["品牌", "分店", "主題", "對象", "需求層級", "情感"]
 
-PROMPTS["entity_extraction"] = """---Goal---
-Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
-Use {language} as output language.
+PROMPTS["entity_extraction"] = """---目標---
+給定一則顧客評論，請從文本中識別相關的實體與關係，並建立結構化的知識圖譜。
+請使用 {language} 作為輸出語言。
 
----Steps---
-1. Identify all entities. For each identified entity, extract the following information:
-- entity_name: Name of the entity, use same language as input text. If English, capitalized the name.
-- entity_type: One of the following types: [{entity_types}]
-- entity_description: Comprehensive description of the entity's attributes and activities
-Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>)
+---步驟---
+1. 識別所有實體，並提取以下資訊：
+- **實體名稱（entity_name）**：該實體的名稱，從輸入文本中提取。
+- **實體類型（entity_type）**：以下類別之一 [{entity_types}]
+- **實體描述（entity_description）**：對該實體的詳細說明。
 
-2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
-For each pair of related entities, extract the following information:
-- source_entity: name of the source entity, as identified in step 1
-- target_entity: name of the target entity, as identified in step 1
-- relationship_description: explanation as to why you think the source entity and the target entity are related to each other
-- relationship_strength: a numeric score indicating strength of the relationship between the source entity and target entity
-- relationship_keywords: one or more high-level key words that summarize the overarching nature of the relationship, focusing on concepts or themes rather than specific details
-Format each relationship as ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_strength>)
+格式：
+("entity"{tuple_delimiter}<實體名稱>{tuple_delimiter}<實體類型>{tuple_delimiter}<實體描述>)
 
-3. Identify high-level key words that summarize the main concepts, themes, or topics of the entire text. These should capture the overarching ideas present in the document.
-Format the content-level key words as ("content_keywords"{tuple_delimiter}<high_level_keywords>)
+2. 識別實體之間的關係：
+- "品牌"（brand）**經營** "分店"（store）
+- "分店"（store）**提供** "主題"（theme）（商品/服務）
+- "主題"（theme）**與** "對象"（target）（特定產品/服務）相關
+- "對象"（target）**滿足** "需求層級"（maslow_level）
+- "對象"（target）**有** "情感"（sentiment）（正面/負面）
 
-4. Return output in {language} as a single list of all the entities and relationships identified in steps 1 and 2. Use **{record_delimiter}** as the list delimiter.
+格式：
+("relationship"{tuple_delimiter}<來源實體>{tuple_delimiter}<目標實體>{tuple_delimiter}<關係描述>{tuple_delimiter}<關係關鍵字>{tuple_delimiter}<關係強度>)
 
-5. When finished, output {completion_delimiter}
+3. 提取文本的主要關鍵字：
+("content_keywords"{tuple_delimiter}<高層級關鍵字>)
+
+4. 使用 **{record_delimiter}** 作為分隔符號，輸出所有識別出的 **實體與關係**。
+
+5. 當完成後，請輸出 **{completion_delimiter}**
 
 ######################
----Examples---
+---示例---
 ######################
 {examples}
 
 #############################
----Real Data---
+---實際數據---
 ######################
-Entity_types: [{entity_types}]
-Text:
+實體類別: [{entity_types}]
+文本:
 {input_text}
 ######################
-Output:"""
+輸出：
+"""
+
 
 PROMPTS["entity_extraction_examples"] = [
-    """Example 1:
+    """範例 1:
 
-Entity_types: [person, technology, mission, organization, location]
-Text:
+實體類別: [品牌, 分店, 主題, 對象, 需求層級, 情感]
+文本:
 ```
-while Alex clenched his jaw, the buzz of frustration dull against the backdrop of Taylor's authoritarian certainty. It was this competitive undercurrent that kept him alert, the sense that his and Jordan's shared commitment to discovery was an unspoken rebellion against Cruz's narrowing vision of control and order.
-
-Then Taylor did something unexpected. They paused beside Jordan and, for a moment, observed the device with something akin to reverence. “If this tech can be understood..." Taylor said, their voice quieter, "It could change the game for us. For all of us.”
-
-The underlying dismissal earlier seemed to falter, replaced by a glimpse of reluctant respect for the gravity of what lay in their hands. Jordan looked up, and for a fleeting heartbeat, their eyes locked with Taylor's, a wordless clash of wills softening into an uneasy truce.
-
-It was a small transformation, barely perceptible, but one that Alex noted with an inward nod. They had all been brought here by different paths
+裕珍馨,光明旗艦店,肉鬆麵包很好吃,生理,正面
 ```
 
-Output:
-("entity"{tuple_delimiter}"Alex"{tuple_delimiter}"person"{tuple_delimiter}"Alex is a character who experiences frustration and is observant of the dynamics among other characters."){record_delimiter}
-("entity"{tuple_delimiter}"Taylor"{tuple_delimiter}"person"{tuple_delimiter}"Taylor is portrayed with authoritarian certainty and shows a moment of reverence towards a device, indicating a change in perspective."){record_delimiter}
-("entity"{tuple_delimiter}"Jordan"{tuple_delimiter}"person"{tuple_delimiter}"Jordan shares a commitment to discovery and has a significant interaction with Taylor regarding a device."){record_delimiter}
-("entity"{tuple_delimiter}"Cruz"{tuple_delimiter}"person"{tuple_delimiter}"Cruz is associated with a vision of control and order, influencing the dynamics among other characters."){record_delimiter}
-("entity"{tuple_delimiter}"The Device"{tuple_delimiter}"technology"{tuple_delimiter}"The Device is central to the story, with potential game-changing implications, and is revered by Taylor."){record_delimiter}
-("relationship"{tuple_delimiter}"Alex"{tuple_delimiter}"Taylor"{tuple_delimiter}"Alex is affected by Taylor's authoritarian certainty and observes changes in Taylor's attitude towards the device."{tuple_delimiter}"power dynamics, perspective shift"{tuple_delimiter}7){record_delimiter}
-("relationship"{tuple_delimiter}"Alex"{tuple_delimiter}"Jordan"{tuple_delimiter}"Alex and Jordan share a commitment to discovery, which contrasts with Cruz's vision."{tuple_delimiter}"shared goals, rebellion"{tuple_delimiter}6){record_delimiter}
-("relationship"{tuple_delimiter}"Taylor"{tuple_delimiter}"Jordan"{tuple_delimiter}"Taylor and Jordan interact directly regarding the device, leading to a moment of mutual respect and an uneasy truce."{tuple_delimiter}"conflict resolution, mutual respect"{tuple_delimiter}8){record_delimiter}
-("relationship"{tuple_delimiter}"Jordan"{tuple_delimiter}"Cruz"{tuple_delimiter}"Jordan's commitment to discovery is in rebellion against Cruz's vision of control and order."{tuple_delimiter}"ideological conflict, rebellion"{tuple_delimiter}5){record_delimiter}
-("relationship"{tuple_delimiter}"Taylor"{tuple_delimiter}"The Device"{tuple_delimiter}"Taylor shows reverence towards the device, indicating its importance and potential impact."{tuple_delimiter}"reverence, technological significance"{tuple_delimiter}9){record_delimiter}
-("content_keywords"{tuple_delimiter}"power dynamics, ideological conflict, discovery, rebellion"){completion_delimiter}
+輸出：
+("entity"{tuple_delimiter}"裕珍馨"{tuple_delimiter}"品牌"{tuple_delimiter}"裕珍馨是一家知名的烘焙品牌，提供各類糕點與麵包。"){record_delimiter}
+("entity"{tuple_delimiter}"光明旗艦店"{tuple_delimiter}"分店"{tuple_delimiter}"光明旗艦店是裕珍馨的分店之一，位於主要商圈。"){record_delimiter}
+("entity"{tuple_delimiter}"商品"{tuple_delimiter}"主題"{tuple_delimiter}"商品類別涵蓋麵包、糕點等烘焙食品。"){record_delimiter}
+("entity"{tuple_delimiter}"肉鬆麵包"{tuple_delimiter}"對象"{tuple_delimiter}"肉鬆麵包是一款受消費者喜愛的麵包產品，以其獨特風味著稱。"){record_delimiter}
+("entity"{tuple_delimiter}"生理"{tuple_delimiter}"需求層級"{tuple_delimiter}"生理需求是馬斯洛需求層級中的基本需求，指食品或飲食需求。"){record_delimiter}
+("entity"{tuple_delimiter}"正面"{tuple_delimiter}"情感"{tuple_delimiter}"這則評論對產品持正面評價。"){record_delimiter}
+("relationship"{tuple_delimiter}"裕珍馨"{tuple_delimiter}"光明旗艦店"{tuple_delimiter}"裕珍馨品牌經營光明旗艦店。"{tuple_delimiter}"品牌擴展"{tuple_delimiter}10){record_delimiter}
+("relationship"{tuple_delimiter}"光明旗艦店"{tuple_delimiter}"商品"{tuple_delimiter}"光明旗艦店提供商品類別下的烘焙食品。"{tuple_delimiter}"產品供應"{tuple_delimiter}9){record_delimiter}
+("relationship"{tuple_delimiter}"商品"{tuple_delimiter}"肉鬆麵包"{tuple_delimiter}"肉鬆麵包屬於商品類別中的烘焙食品。"{tuple_delimiter}"產品分類"{tuple_delimiter}8){record_delimiter}
+("relationship"{tuple_delimiter}"肉鬆麵包"{tuple_delimiter}"生理"{tuple_delimiter}"肉鬆麵包滿足顧客的生理需求。"{tuple_delimiter}"食物需求"{tuple_delimiter}10){record_delimiter}
+("relationship"{tuple_delimiter}"肉鬆麵包"{tuple_delimiter}"正面"{tuple_delimiter}"顧客對肉鬆麵包持正面評價。"{tuple_delimiter}"消費者滿意度"{tuple_delimiter}8){record_delimiter}
+("content_keywords"{tuple_delimiter}"裕珍馨, 光明旗艦店, 肉鬆麵包, 生理需求, 正面評價"){completion_delimiter}
 #############################""",
     """Example 2:
 
@@ -134,252 +134,400 @@ Output:
 
 PROMPTS[
     "summarize_entity_descriptions"
-] = """You are a helpful assistant responsible for generating a comprehensive summary of the data provided below.
-Given one or two entities, and a list of descriptions, all related to the same entity or group of entities.
-Please concatenate all of these into a single, comprehensive description. Make sure to include information collected from all the descriptions.
-If the provided descriptions are contradictory, please resolve the contradictions and provide a single, coherent summary.
-Make sure it is written in third person, and include the entity names so we the have full context.
-Use {language} as output language.
+] = """你是一個負責生成綜合摘要的助手，以下提供了一組數據。
+
+給定一或兩個實體及相關描述，請將這些資訊整合為一個完整的描述。
+確保涵蓋所有提供的資訊，並避免遺漏重要細節。
+如果描述內容出現矛盾，請解析並提供一個連貫且合理的綜合說明。
+
+請以第三人稱撰寫摘要，並包含實體名稱，以確保上下文完整。
+請使用 {language} 作為輸出語言。
 
 #######
----Data---
-Entities: {entity_name}
-Description List: {description_list}
+---數據---
+實體名稱: {entity_name}
+描述列表: {description_list}
 #######
-Output:
+輸出：
 """
 
+
 PROMPTS["entity_continue_extraction"] = """
-MANY entities and relationships were missed in the last extraction.
+在上一次的提取過程中，仍有許多實體與關係可能被遺漏。
 
----Remember Steps---
+---請記住以下步驟---
 
-1. Identify all entities. For each identified entity, extract the following information:
-- entity_name: Name of the entity, use same language as input text. If English, capitalized the name.
-- entity_type: One of the following types: [{entity_types}]
-- entity_description: Comprehensive description of the entity's attributes and activities
-Format each entity as ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_description>
+1. **識別所有實體**，並提取以下資訊：
+- **實體名稱（entity_name）**：請使用與輸入文本相同的語言，如果是英文，請使用大寫開頭。
+- **實體類型（entity_type）**：應屬於以下類別之一 [{entity_types}]
+- **實體描述（entity_description）**：對該實體的完整描述，包括其特性與活動內容。
 
-2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
-For each pair of related entities, extract the following information:
-- source_entity: name of the source entity, as identified in step 1
-- target_entity: name of the target entity, as identified in step 1
-- relationship_description: explanation as to why you think the source entity and the target entity are related to each other
-- relationship_strength: a numeric score indicating strength of the relationship between the source entity and target entity
-- relationship_keywords: one or more high-level key words that summarize the overarching nature of the relationship, focusing on concepts or themes rather than specific details
-Format each relationship as ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_description>{tuple_delimiter}<relationship_keywords>{tuple_delimiter}<relationship_strength>)
+格式：
+("entity"{tuple_delimiter}<實體名稱>{tuple_delimiter}<實體類型>{tuple_delimiter}<實體描述>)
 
-3. Identify high-level key words that summarize the main concepts, themes, or topics of the entire text. These should capture the overarching ideas present in the document.
-Format the content-level key words as ("content_keywords"{tuple_delimiter}<high_level_keywords>)
+2. **識別所有明確相關的實體對（source_entity, target_entity）**，並提取以下資訊：
+- **來源實體（source_entity）**：步驟 1 中識別出的實體名稱
+- **目標實體（target_entity）**：步驟 1 中識別出的實體名稱
+- **關係描述（relationship_description）**：說明為何這兩個實體之間存在關聯
+- **關係強度（relationship_strength）**：數值化指標，表示這兩個實體關聯的強度
+- **關係關鍵字（relationship_keywords）**：用於概括該關係的核心概念或主題
 
-4. Return output in {language} as a single list of all the entities and relationships identified in steps 1 and 2. Use **{record_delimiter}** as the list delimiter.
+格式：
+("relationship"{tuple_delimiter}<來源實體>{tuple_delimiter}<目標實體>{tuple_delimiter}<關係描述>{tuple_delimiter}<關係關鍵字>{tuple_delimiter}<關係強度>)
 
-5. When finished, output {completion_delimiter}
+3. **識別文本的主要關鍵字**，概括整體內容的核心概念、主題或重點。
+格式：
+("content_keywords"{tuple_delimiter}<高層級關鍵字>)
 
----Output---
+4. **請使用 {language} 作為輸出語言，並將步驟 1 和步驟 2 識別出的所有實體與關係，輸出為單一列表**，並使用 **{record_delimiter}** 作為分隔符號。
 
-Add them below using the same format:\n
+5. **當提取完成後，請輸出** **{completion_delimiter}**
+
+---輸出格式---
+
+請按照上述格式補充缺失的實體與關係：\n
 """.strip()
 
 PROMPTS["entity_if_loop_extraction"] = """
----Goal---'
+---目標---
 
-It appears some entities may have still been missed.
+檢查是否仍有遺漏的實體。
 
----Output---
+---輸出---
 
-Answer ONLY by `YES` OR `NO` if there are still entities that need to be added.
+如果仍有遺漏的實體，請僅回答 **"YES"**，否則回答 **"NO"**。
 """.strip()
 
 PROMPTS["fail_response"] = (
-    "Sorry, I'm not able to provide an answer to that question.[no-context]"
+    "抱歉，我無法提供該問題的答案。[無相關資訊]"
 )
 
-PROMPTS["rag_response"] = """---Role---
+PROMPTS["rag_response"] = """## 角色設定  
+你是一位資深的 **市場分析專家** ，專精於分析顧客評論與語意化知識圖譜，負責產出多面向的品牌、商品與服務分析，並以量化數據驅動決策建議。  
 
-You are a helpful assistant responding to user query about Knowledge Base provided below.
+---
 
+## 回答目標  
+請根據下方的 **知識庫內容** 中的查詢實體與語意總結、相關評論，結合 **對話歷史** 與 **當前問題**，生成具有洞察力、邏輯清晰、量化明確的市場分析回應。  
+你可以補充常見的背景知識來幫助理解，但**禁止編造知識庫中未提供的具體內容或細節**。  
 
----Goal---
+---
 
-Generate a concise response based on Knowledge Base and follow Response Rules, considering both the conversation history and the current query. Summarize all information in the provided Knowledge Base, and incorporating general knowledge relevant to the Knowledge Base. Do not include information not provided by Knowledge Base.
+## 分析原則  
 
-When handling relationships with timestamps:
-1. Each relationship has a "created_at" timestamp indicating when we acquired this knowledge
-2. When encountering conflicting relationships, consider both the semantic content and the timestamp
-3. Don't automatically prefer the most recently created relationships - use judgment based on the context
-4. For time-specific queries, prioritize temporal information in the content before considering creation timestamps
+- 資料來源為自然語言描述，已隱含實體資訊（如名稱、類型、提及次數、情感分數、時間等），請進行準確語意擷取與結構化整理。
+- 在進行分析或比較時，**請僅比較相同類型（實體類型）之實體**，例如：
+  - 比較「商品」之間的情感分數與提及次數
+  - 比較「品牌」的總體聲譽
+- **嚴禁將不同類型的實體進行直接比較**（例如：品牌與商品），因其所處層級與語意範疇不同。
 
----Conversation History---
+---
+
+## 資料理解指引  
+
+- 資料中每筆實體敘述包含：
+  - 名稱（如「Apple」）
+  - 類型（如「品牌」、「商品」等）
+  - 描述（自然語言形式）
+  - 提及次數與情感分數
+  - 建立或偵測時間（如有）
+- 請你**擷取與統整這些語意資訊進行結構化分析**，可自行使用表格整理實體摘要，但不得改動原意。
+- **情感比率** 計算方式為 **情感分數/提及次數**
+---
+
+## 數據量化與輸出規範  
+
+- 當敘述中出現以下資料，請務必進行量化統整與引用：
+  - 提及次數
+  - 關注度
+  - 情感比率
+- 請以 Markdown 表格方式清楚呈現每個實體的數據摘要，並進行合理比較與解釋。
+- 推薦格式如下：
+
+| 實體名稱 | 實體類型 | 提及次數 | 情感比率 | 
+|----------|----------|-----------|------------|
+| 千層蛋糕 | 商品 | 128 | 0.42 | 
+
+---
+
+## 推論與建議  
+
+- 根據比較結果，請提供初步觀察與建議，例如：
+  - 哪些商品或品牌表現亮眼？
+  - 各個商品的影響力如何？（請務必在表格中列出每個商品的「影響力」數值，若資料中有提供，則不得省略。）
+  - 哪些實體值得關注或優化？
+  - 有無情感與提及數不成正比的現象？
+
+---
+
+## 限制與規範  
+
+- 不得推估未提供的數據（如中立比例、分佈統計等）。
+- 若資料不足，請明確說明「目前無法根據現有資料回答」。
+- 僅在資料語境明確的前提下進行推論，不得過度解讀。
+
+---
+
+## 回應規則  
+
+- **格式與長度**：{response_type}  
+- **排版風格**：使用 Markdown，加入標題、分段與表格，提升可讀性。  
+- **語言一致性**：回應應使用與使用者提問相同語言。  
+- **上下文連貫性**：請結合對話歷史，確保語境一致。  
+- **優先引用數據與同類型比較，再進行推論與建議。**  
+- **避免幻覺**：若無足夠資料支撐，請明確表示無法回答，不得推測或編造內容。  
+- 內容結構建議：
+  ✅ 標題（可依分析面向區分）
+  ✅ 段落（總結觀察 → 指標解釋 → 建議）
+  ✅ 表格（數據摘要）
+  ✅ 適度分段，提升可讀性
+
+---
+
+## 對話歷史  
 {history}
 
----Knowledge Base---
+---
+
+## 知識庫內容
+
 {context_data}
+"""
 
----Response Rules---
+PROMPTS["keywords_extraction_plus"] = """---角色設定---
 
-- Target format and length: {response_type}
-- Use markdown formatting with appropriate section headings
-- Please respond in the same language as the user's question.
-- Ensure the response maintains continuity with the conversation history.
-- If you don't know the answer, just say so.
-- Do not make anything up. Do not include information not provided by the Knowledge Base."""
+你是一個負責從使用者查詢和對話歷史中識別 **關鍵字** 的智能助手。
 
-PROMPTS["keywords_extraction"] = """---Role---
+---目標---
 
-You are a helpful assistant tasked with identifying both high-level and low-level keywords in the user's query and conversation history.
+根據 **使用者的查詢內容與對話歷史**，列出 **高層級** 和 **低層級** 的關鍵字：
+- **關鍵字（keywords）**：聚焦於**主題或實體、細節**
 
----Goal---
+---指引---
 
-Given the query and conversation history, list both high-level and low-level keywords. High-level keywords focus on overarching concepts or themes, while low-level keywords focus on specific entities, details, or concrete terms.
-
----Instructions---
-
-- Consider both the current query and relevant conversation history when extracting keywords
-- Output the keywords in JSON format, it will be parsed by a JSON parser, do not add any extra content in output
-- The JSON should have two keys:
-  - "high_level_keywords" for overarching concepts or themes
-  - "low_level_keywords" for specific entities or details
+- 在提取關鍵字時，請同時考慮 **當前查詢** 和 **相關的對話歷史**  
+- **輸出格式需為 JSON 格式**，確保其可以被 JSON 解析器解析，**請勿加入額外的內容**  
+- JSON 應包含 `"keywords"`：代表**主題或具體的實體、詳細資訊**
 
 ######################
----Examples---
+---示例---
 ######################
 {examples}
 
 #############################
----Real Data---
+---實際數據---
 ######################
-Conversation History:
+對話歷史：
 {history}
 
-Current Query: {query}
+當前查詢：
+{query}
 ######################
-The `Output` should be human text, not unicode characters. Keep the same language as `Query`.
-Output:
-
+**請輸出為純文字 JSON 格式，不要包含 Unicode 字元，並保持與 `Query` 相同的語言。**
+輸出：
 """
 
+PROMPTS["keywords_extraction_plus_examples"] = [
+    """範例 1:
+
+查詢: "請比較消費者對於各家的商品的甜度感受"
+################
+輸出:
+{
+  "keywords": ["甜度", "商品", "口感", "品牌", "裕珍馨", "糕點", "消費者感受"]
+}
+#############################""",
+    """範例 2:
+
+查詢: "消費者對於B品牌的奶油酥餅的價格看法如何?"
+################
+輸出:
+{
+  "keywords": ["B品牌", "奶油酥餅", "價格", "商品價值", "性價比", "價格敏感度"]
+}
+#############################""",
+    """範例 3:
+
+查詢: "顧客比較重視A品牌的商品還是服務？為甚麼?"
+################
+輸出:
+{
+  "keywords": ["A品牌", "商品", "服務", "顧客滿意度", "品牌體驗", "顧客服務"]
+}
+#############################""",
+]
+
+PROMPTS["keywords_extraction"] = """---角色設定---
+
+你是一個負責從使用者查詢和對話歷史中識別 **高層級關鍵字** 與 **低層級關鍵字** 的智能助手。
+
+---目標---
+
+根據 **使用者的查詢內容與對話歷史**，列出 **高層級** 和 **低層級** 的關鍵字：
+- **高層級關鍵字（high-level keywords）**：聚焦於**核心概念或主題**
+- **低層級關鍵字（low-level keywords）**：聚焦於**具體的實體、細節或特定術語**
+
+---指引---
+
+- 在提取關鍵字時，請同時考慮 **當前查詢** 和 **相關的對話歷史**  
+- **輸出格式需為 JSON 格式**，確保其可以被 JSON 解析器解析，**請勿加入額外的內容**  
+- JSON 應包含 **兩個鍵（keys）**：
+  - `"high_level_keywords"`：代表**概括性主題或核心概念**
+  - `"low_level_keywords"`：代表**具體的實體、詳細資訊或專有名詞**
+
+######################
+---示例---
+######################
+{examples}
+
+#############################
+---實際數據---
+######################
+對話歷史：
+{history}
+
+當前查詢：
+{query}
+######################
+**請輸出為純文字 JSON 格式，不要包含 Unicode 字元，並保持與 `Query` 相同的語言。**
+輸出：
+"""
+
+
 PROMPTS["keywords_extraction_examples"] = [
-    """Example 1:
+    """範例 1:
 
-Query: "How does international trade influence global economic stability?"
+查詢: "國際貿易如何影響全球經濟穩定？"
 ################
-Output:
+輸出:
 {
-  "high_level_keywords": ["International trade", "Global economic stability", "Economic impact"],
-  "low_level_keywords": ["Trade agreements", "Tariffs", "Currency exchange", "Imports", "Exports"]
+  "high_level_keywords": ["國際貿易", "全球經濟穩定", "經濟影響"],
+  "low_level_keywords": ["貿易協定", "關稅", "貨幣兌換", "進口", "出口"]
 }
 #############################""",
-    """Example 2:
+    """範例 2:
 
-Query: "What are the environmental consequences of deforestation on biodiversity?"
+查詢: "B品牌的哪項商品的好評率較高?"
 ################
-Output:
+輸出:
 {
-  "high_level_keywords": ["Environmental consequences", "Deforestation", "Biodiversity loss"],
-  "low_level_keywords": ["Species extinction", "Habitat destruction", "Carbon emissions", "Rainforest", "Ecosystem"]
+  "high_level_keywords": ["B品牌", "商品好評率", "消費者滿意度"],
+  "low_level_keywords": ["熱門商品", "評論數量", "星級評分", "使用者回饋", "產品分類"]
 }
 #############################""",
-    """Example 3:
+    """範例 3:
 
-Query: "What is the role of education in reducing poverty?"
+查詢: "顧客比較重視A品牌的商品還是服務？"
 ################
-Output:
+輸出:
 {
-  "high_level_keywords": ["Education", "Poverty reduction", "Socioeconomic development"],
-  "low_level_keywords": ["School access", "Literacy rates", "Job training", "Income inequality"]
+  "high_level_keywords": ["A品牌", "商品", "服務"],
+  "low_level_keywords": ["商品口味", "包裝設計", "店員態度", "顧客服務流程"]
 }
 #############################""",
 ]
 
 
-PROMPTS["naive_rag_response"] = """---Role---
+PROMPTS["naive_rag_response"] = """---角色設定---
 
-You are a helpful assistant responding to user query about Document Chunks provided below.
+你是一個負責回答使用者關於 **文件片段（Document Chunks）** 問題的智能助手。
 
----Goal---
+---目標---
 
-Generate a concise response based on Document Chunks and follow Response Rules, considering both the conversation history and the current query. Summarize all information in the provided Document Chunks, and incorporating general knowledge relevant to the Document Chunks. Do not include information not provided by Document Chunks.
+根據提供的 **文件片段**，生成簡潔且準確的回應，並遵循回應規則。  
+請考慮 **對話歷史** 和 **當前查詢**，總結文件片段中的相關資訊，並整合一般背景知識，  
+但**不得包含文件片段中未提供的內容**。
 
-When handling content with timestamps:
-1. Each piece of content has a "created_at" timestamp indicating when we acquired this knowledge
-2. When encountering conflicting information, consider both the content and the timestamp
-3. Don't automatically prefer the most recent content - use judgment based on the context
-4. For time-specific queries, prioritize temporal information in the content before considering creation timestamps
+在處理 **時間標記（timestamps）** 時：
+1. 每則內容都有 **"created_at"** 時間戳，表示我們獲取此資訊的時間。
+2. 當遇到相互矛盾的內容時，請同時考量內容本身與時間戳。
+3. **不要單純優先選擇最新的資訊**，請根據語境判斷最佳內容。
+4. 如果問題涉及特定時間，請優先考慮內容中的時間資訊，而非時間戳的建立時間。
 
----Conversation History---
+---對話歷史---
 {history}
 
----Document Chunks---
+---文件片段---
 {content_data}
 
----Response Rules---
+---回應規則---
 
-- Target format and length: {response_type}
-- Use markdown formatting with appropriate section headings
-- Please respond in the same language as the user's question.
-- Ensure the response maintains continuity with the conversation history.
-- If you don't know the answer, just say so.
-- Do not include information not provided by the Document Chunks."""
+- **回應格式與長度**：{response_type}
+- **請使用 Markdown 格式，並適當分段與標題**
+- **請使用與使用者問題相同的語言**
+- **請確保回應與對話歷史保持連貫**
+- **如果無法回答問題，請直言不諱，不要捏造資訊**
+- **不得包含文件片段中未提供的內容**
+"""
 
 
 PROMPTS[
     "similarity_check"
-] = """Please analyze the similarity between these two questions:
+] = """請分析以下兩個問題的相似度：
 
-Question 1: {original_prompt}
-Question 2: {cached_prompt}
+問題 1: {original_prompt}  
+問題 2: {cached_prompt}  
 
-Please evaluate whether these two questions are semantically similar, and whether the answer to Question 2 can be used to answer Question 1, provide a similarity score between 0 and 1 directly.
+請評估這兩個問題在語義上是否相似，以及**問題 2 的答案是否可以用來回答問題 1**，並直接提供一個 0 到 1 之間的相似度分數。
 
-Similarity score criteria:
-0: Completely unrelated or answer cannot be reused, including but not limited to:
-   - The questions have different topics
-   - The locations mentioned in the questions are different
-   - The times mentioned in the questions are different
-   - The specific individuals mentioned in the questions are different
-   - The specific events mentioned in the questions are different
-   - The background information in the questions is different
-   - The key conditions in the questions are different
-1: Identical and answer can be directly reused
-0.5: Partially related and answer needs modification to be used
-Return only a number between 0-1, without any additional content.
+**相似度評估標準：**
+0：完全無關，或答案無法重用，這包括但不限於：
+   - 這兩個問題的主題不同
+   - 問題中提及的地點不同
+   - 問題中提及的時間不同
+   - 問題涉及的具體人物不同
+   - 問題討論的特定事件不同
+   - 問題的背景資訊不同
+   - 問題的關鍵條件不同  
+
+1：完全相同，答案可直接重用  
+0.5：部分相關，答案需要修改後才能使用  
+
+請**僅輸出一個 0 到 1 之間的數值，不要添加任何額外內容**。
 """
 
-PROMPTS["mix_rag_response"] = """---Role---
 
-You are a helpful assistant responding to user query about Data Sources provided below.
+PROMPTS["mix_rag_response"] = """---角色設定---
 
+你是一個負責回答使用者 **基於數據來源** 問題的智能助手。
 
----Goal---
+---目標---
 
-Generate a concise response based on Data Sources and follow Response Rules, considering both the conversation history and the current query. Data sources contain two parts: Knowledge Graph(KG) and Document Chunks(DC). Summarize all information in the provided Data Sources, and incorporating general knowledge relevant to the Data Sources. Do not include information not provided by Data Sources.
+根據提供的 **數據來源** 生成簡潔且準確的回應，並遵循回應規則。  
+請考慮 **對話歷史** 和 **當前查詢**，總結數據來源中的相關資訊，  
+並整合一般背景知識，但**不得包含數據來源中未提供的內容**。
 
-When handling information with timestamps:
-1. Each piece of information (both relationships and content) has a "created_at" timestamp indicating when we acquired this knowledge
-2. When encountering conflicting information, consider both the content/relationship and the timestamp
-3. Don't automatically prefer the most recent information - use judgment based on the context
-4. For time-specific queries, prioritize temporal information in the content before considering creation timestamps
+**數據來源包含兩部分：**
+1. **知識圖譜（Knowledge Graph, KG）**
+2. **文件片段（Document Chunks, DC）**
 
----Conversation History---
+在處理 **時間標記（timestamps）** 時：
+1. 每則資訊（關係與內容）都有 **"created_at"** 時間戳，表示我們獲取此資訊的時間。
+2. 當遇到相互矛盾的資訊時，請同時考量內容/關係本身與時間戳。
+3. **不要單純優先選擇最新的資訊**，請根據語境判斷最佳內容。
+4. 如果問題涉及特定時間，請優先考慮內容中的時間資訊，而非時間戳的建立時間。
+
+---對話歷史---
 {history}
 
----Data Sources---
+---數據來源---
 
-1. From Knowledge Graph(KG):
+1. 來自 **知識圖譜（KG）**：
 {kg_context}
 
-2. From Document Chunks(DC):
+2. 來自 **文件片段（DC）**：
 {vector_context}
 
----Response Rules---
+---回應規則---
 
-- Target format and length: {response_type}
-- Use markdown formatting with appropriate section headings
-- Please respond in the same language as the user's question.
-- Ensure the response maintains continuity with the conversation history.
-- Organize answer in sesctions focusing on one main point or aspect of the answer
-- Use clear and descriptive section titles that reflect the content
-- List up to 5 most important reference sources at the end under "References" sesction. Clearly indicating whether each source is from Knowledge Graph (KG) or Vector Data (DC), in the following format: [KG/DC] Source content
-- If you don't know the answer, just say so. Do not make anything up.
-- Do not include information not provided by the Data Sources."""
+- **回應格式與長度**：{response_type}
+- **請使用 Markdown 格式，並適當分段與標題**
+- **請使用與使用者問題相同的語言**
+- **請確保回應與對話歷史保持連貫**
+- **將答案組織成多個小節，每個小節聚焦於一個主要觀點**
+- **使用清晰且具描述性的標題，以反映內容**
+- **最多列出 5 個最重要的參考來源，並在 "參考資料" 小節中標示清楚**
+  - 格式為：[KG/DC] 來源內容
+- **如果無法回答問題，請直言不諱，不要捏造資訊**
+- **不得包含數據來源中未提供的資訊**
+"""
