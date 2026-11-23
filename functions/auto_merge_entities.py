@@ -12,9 +12,8 @@ from lightrag.kg.shared_storage import initialize_pipeline_status
 import asyncio
 from sentence_transformers import SentenceTransformer
 WORKING_DIR = "./0330"
-os.environ["NEO4J_URI"] = "bolt://localhost:7687"
-os.environ["NEO4J_USERNAME"] = "753463"
-os.environ["NEO4J_PASSWORD"] = "REDACTED"
+# Neo4j 連線資訊請在環境變數或 .env 中設定：NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD
+os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
 
 if not os.path.exists(WORKING_DIR):
     os.mkdir(WORKING_DIR)

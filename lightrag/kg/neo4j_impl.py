@@ -4,7 +4,7 @@ import inspect
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, final, Optional
+from typing import Any, Dict, List, final, Optional
 import numpy as np
 import configparser
 
@@ -269,7 +269,6 @@ class Neo4JStorage(BaseGraphStorage):
             database=self._DATABASE, default_access_mode="READ"
         ) as session:
             try:
-                print(f"GET NODE 時間: {query_start} ~ {query_end}")
                 record = await session.run(
                     "MATCH (n:base {entity_id: $id}) RETURN n, n.entity_type AS type",
                     id=node_id
@@ -287,57 +286,107 @@ class Neo4JStorage(BaseGraphStorage):
                 if entity_type == "構面":
                     query = """MATCH (n:base {entity_id: $entity_id})
                         MATCH (src)-[r]->(n)
-                        WHERE r.date >= date({date: $start_date}) AND r.date <= date({date: $end_date}) AND src.entity_id CONTAINS $root
-                        WITH n, r.source_id AS source_id, collect(r.sentiment_score) AS scores
-                        WITH n, source_id, reduce(s = 0.0, x IN scores | s + x) / size(scores) AS avg_score
-                        RETURN 
-                        n,
-                        collect(source_id) AS source_ids,
-                        count(source_id) AS mention_count,
-                        sum(avg_score) AS sentiment_score
+                        WHERE r.date >= date({date: $start_date}) 
+                        AND r.date <= date({date: $end_date}) 
+                        AND src.entity_id CONTAINS $root
+                        // 先把每一筆 source_id 跟對應的 sentiment_score 蒐集起來
+                        WITH n, r.brand AS brand, r.source_id AS source_id, r.sentiment_score AS sentiment_score, r.opinion AS opinion
+
+                        // 先以品牌分組，收集 source_id、opinion 及所有情感分數
+                        WITH n, brand,
+                            collect(source_id) AS source_ids,
+                            collect(opinion) AS opinions,
+                            collect(sentiment_score) AS scores,
+                            count(*) AS mention_count
+
+                        // 把 scores 攤開成單一分數
+                        UNWIND scores AS score
+
+                        // 這裡「score」就已經是單一數值，可直接聚合
+                        WITH n, brand, source_ids, opinions, mention_count, score
+
+                        RETURN
+                            n,
+                            brand,
+                            source_ids,
+                            mention_count,
+                            avg(score) AS avg_sentiment,
+                            stDev(score) AS sentiment_stddev,
+                            opinions
+                        ORDER BY mention_count DESC
                         """
                 else:
-                    query = """MATCH (n:base {entity_id: $entity_id})
+                    query = """
+                        MATCH (n:base {entity_id: $entity_id})
                         MATCH (n)-[r]->(trg)
-                        WHERE r.date >= date({date: $start_date}) AND r.date <= date({date: $end_date}) AND trg.entity_id CONTAINS $root
-                        WITH n AS n, r.source_id AS source_id, collect(r.sentiment_score) AS scores
-                        WITH n, source_id, reduce(s = 0.0, x IN scores | s + x) / size(scores) AS avg_score
-                        RETURN 
-                        n,
-                        collect(source_id) AS source_ids,
-                        count(source_id) AS mention_count,
-                        sum(avg_score) AS sentiment_score
+                        WHERE r.date >= date({date: $start_date})
+                        AND r.date <= date({date: $end_date})
+                        AND trg.entity_id CONTAINS $root
+                        // 先把每一筆 source_id 跟對應的 sentiment_score 蒐集起來
+                        WITH n, r.brand AS brand, r.source_id AS source_id, r.sentiment_score AS sentiment_score
 
+                        // 先以品牌分組，收集 source_id、opinion 及所有情感分數
+                        WITH n, brand,
+                            collect(source_id) AS source_ids,
+                            collect(sentiment_score) AS scores,
+                            count(*) AS mention_count
+
+                        // 把 scores 攤開成單一分數
+                        UNWIND scores AS score
+
+                        // 這裡「score」就已經是單一數值，可直接聚合
+                        WITH n, brand, source_ids, mention_count, score
+
+                        RETURN
+                            n,
+                            brand,
+                            source_ids,
+                            mention_count,
+                            avg(score) AS avg_sentiment,
+                            stDev(score) AS sentiment_stddev,
+                            [] AS opinions
+                        ORDER BY mention_count DESC
                         """
                 result = await session.run(query, entity_id=node_id, start_date=query_start, end_date=query_end, root=root_id)
                 try:
-                    records = await result.fetch(
-                        2
-                    )  # Get 2 records for duplication check
+                    brand_stats: List[Dict[str, Any]] = []
+                    async for rec in result:
+                        if rec["opinions"]:
+                            # 1. 如果有意見詞，則把意見詞加入 brand_stats
+                            brand_stats.append({
+                                "brand":           rec["brand"],
+                                "source_ids":      rec["source_ids"],
+                                "mention_count":   rec["mention_count"],
+                                "avg_sentiment_score": rec["avg_sentiment"],
+                                "sentiment_stddev": rec["sentiment_stddev"],
+                                "opinions":        rec["opinions"]
+                            })
+                        else:
+                            brand_stats.append({
+                                "brand":           rec["brand"],
+                                "source_ids":      rec["source_ids"],
+                                "mention_count":   rec["mention_count"],
+                                "avg_sentiment_score": rec["avg_sentiment"],
+                                "sentiment_stddev": rec["sentiment_stddev"]
+                            })
+                    # 5. 計算整體的 mention_count & sentiment_score
+                    overall_mentions = sum(bs["mention_count"]
+                                           for bs in brand_stats)
+                    overall_avg_sentiment = np.mean(
+                        [bs["avg_sentiment_score"]
+                            for bs in brand_stats if bs["avg_sentiment_score"] is not None]
+                    ) if overall_mentions > 0 else 0.0
 
-                    if len(records) > 1:
-                        logger.warning(
-                            f"Multiple nodes found with label '{node_id}'. Using first node."
-                        )
-                    if records:
-                        record = records[0]
-                        node = record["n"]
-                        node_dict = dict(node)
-                        node_dict["source_ids"] = record["source_ids"]
-                        node_dict["mention_count"] = record["mention_count"]
-                        node_dict["sentiment_score"] = record["sentiment_score"]
-
-                        # Remove base label from labels list if it exists
-                        if "labels" in node_dict:
-                            node_dict["labels"] = [
-                                label
-                                for label in node_dict["labels"]
-                                if label != "base"
-                            ]
-                        logger.debug(
-                            f"Neo4j query node {query} return: {node_dict}")
-                        return node_dict
-                    return None
+                    # 6. 把結果掛回 node
+                    node["brand_stats"] = brand_stats
+                    node["mention_count"] = overall_mentions
+                    node["opinions"] = [{"brand": bs["brand"], "opinions": bs["opinions"]}
+                                        for bs in brand_stats if "opinions" in bs]
+                    node["avg_sentiment_score"] = overall_avg_sentiment
+                    if overall_mentions == 0:
+                        return None
+                    logger.debug(f"get_node({node_id}) → {node}")
+                    return node
                 finally:
                     await result.consume()  # Ensure result is fully consumed
             except Exception as e:

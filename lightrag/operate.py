@@ -5,7 +5,7 @@ from datetime import datetime
 import json
 import re
 import os
-from typing import Any, AsyncIterator, Union
+from typing import Any, AsyncIterator, Dict, List, Union
 from collections import Counter, defaultdict
 
 from .utils import (
@@ -1372,7 +1372,10 @@ async def kg_query_plus_with_function_call(
         query, query_param, global_config, hashing_kv
     )
     function_call_results = await get_function_call_results(query, query_param, global_config, knowledge_graph_inst)
-    time_range_list = json.loads(function_call_results)
+    if isinstance(function_call_results, str):
+        time_range_list = json.loads(function_call_results)
+    else:
+        time_range_list = function_call_results
     if keywords == []:
         return PROMPTS["fail_response"]
     keywords_str = ", ".join(keywords)
@@ -1776,7 +1779,7 @@ async def _build_query_context(
                 query_param,
                 tr  # ⬅️ 指定該段時間區間
             )
-
+            print("_get_node_data test")
             # 跳過空結果
             if not entities_context.strip() and not relations_context.strip():
                 continue
@@ -1840,17 +1843,6 @@ async def _build_query_context(
     # not necessary to use LLM to generate a response
     if not entities_context.strip() and not relations_context.strip():
         return None
-    # # MARK// 最終結果輸出
-    # result = f"""
-    # -----查詢實體與語意總結-----
-    # {entity_relation_summary_context}
-    # -----相關評論-----
-    # {text_units_context}
-    # """.strip()
-    # # -----來源評論-----
-    # print(result)
-    # return result
-    # 若全部時間區間都查無結果，回傳 None
     if not results_by_time:
         return None
 
@@ -1858,15 +1850,17 @@ async def _build_query_context(
 
     for r in results_by_time:
         section = f"""
-    🕒【時間區間】：{r['time_range']}
+            🕒【時間區間】：{r['time_range']}
 
-    -----實體與語意總結-----
-    {r['entity_summary']}
+            -----JSON分析資料-----
+            {r['entity_summary']}
 
-    -----相關評論-----
-    {r['text_units']}
-    """.strip()
+            
+            """.strip()
+        # -----相關評論-----
+        #     {r['text_units']}
         result_parts.append(section)
+        # print(r['entity_summary'])
 
     # 用分隔線區分不同時間段的結果
     final_result = "\n\n==============================\n\n".join(result_parts)
@@ -2020,77 +2014,133 @@ async def _get_node_data(
 
     text_units_descriptions = []
     for i, t in enumerate(use_text_units):
-        text_units_descriptions.append(
-            f"【{i+1}】來自「{t['entity_name']}」的段落：\n「{t['content']}」\n"
-        )
-    text_units_context = "\n".join(text_units_descriptions)
+        text_units_descriptions.append({
+            "index": i + 1,
+            "brand_name": t.get("brand_name", "未知品牌"),   # 新增品牌資訊
+            "entity_name": t.get("entity_name", "未知構面"),
+            "content": t.get("content", "")
+        })
+    text_units_context = json.dumps(
+        text_units_descriptions, ensure_ascii=False, indent=2)
     entity_relation_summary_context = build_entity_relation_summary(
         use_relations)
     return entities_context, relations_context, text_units_context, entity_relation_summary_context
 
 
-def build_entity_relation_summary(use_relations: list[dict]) -> str:
-    from collections import defaultdict
-
-    # 第一層聚合：來源 → [構面]
+def build_entity_relation_summary(use_relations: List[Dict[str, Any]]) -> str:
+    """
+    根據 use_relations 建立跨品牌的實體—構面彙總，並以 JSON 字串回傳。
+    """
+    def remove_source_id(brand_stats: list) -> list:
+        """移除 brand_stats 中每個 dict 的 source_ids 欄位"""
+        if not isinstance(brand_stats, list):
+            return brand_stats
+        new_stats = []
+        for stat in brand_stats:
+            if isinstance(stat, dict):
+                # 建立一個不含 source_ids 的新 dict
+                filtered = {k: v for k, v in stat.items() if k != "source_ids"}
+                new_stats.append(filtered)
+            else:
+                new_stats.append(stat)
+        return new_stats
+    # 內部資料結構：來源節點 → 統計
     graph = defaultdict(lambda: {
         "type": "UNKNOWN",
         "mention_count": 0,
-        "sentiment_score": 0,
+        "sentiment_score": 0.0,
+        "opinions": [],
+        # "brand_stats": [],
         "facets": defaultdict(lambda: {
             "mention_count": 0,
-            "sentiment_score": 0,
+            "sentiment_score": 0.0,
+            "brand_stats": []
         })
     })
 
+    # 聚合輸入關係
     for rel in use_relations:
-        src = rel.get("src_node")
-        tgt = rel.get("tgt_node")
-        src_degree = rel.get("rank")
+        src = rel.get("src_node", {}) or {}
+        tgt = rel.get("tgt_node", {}) or {}
         if not src or not tgt:
             continue
 
-        src_name = src.get("entity_id")
-        tgt_name = tgt.get("entity_id")
-
-        # 來源資訊
-        if graph[src_name]["mention_count"] == 0:
-            graph[src_name]["type"] = src.get("entity_type", "未知類型")
-            graph[src_name]["mention_count"] = src.get("mention_count", 0)
-            graph[src_name]["sentiment_score"] = src.get("sentiment_score", 0)
-
-        # 構面資訊
-        graph[src_name]["facets"][tgt_name]["mention_count"] = tgt.get(
+        src_id = src.get("entity_id", "")
+        tgt_id = tgt.get("entity_id", "")
+        # 設定來源節點基本資訊（只做一次）
+        if graph[src_id]["mention_count"] == 0:
+            graph[src_id]["type"] = src.get("entity_type", "UNKNOWN")
+            graph[src_id]["mention_count"] = src.get("mention_count", 0)
+            graph[src_id]["avg_sentiment_score"] = src.get(
+                "avg_sentiment_score", 0.0)
+            # graph[src_id]["brand_stats"] = src.get("brand_stats", [])
+            graph[src_id]["opinions"] = src.get(
+                "opinions", [])
+        # 設定對應構面統計
+        graph[src_id]["facets"][tgt_id]["mention_count"] = tgt.get(
             "mention_count", 0)
-        graph[src_name]["facets"][tgt_name]["sentiment_score"] = tgt.get(
-            "sentiment_score", 0)
-
-    # ⬇️ 組裝輸出
-    output = []
-    for src_name, data in graph.items():
-        if (data['type'] == "構面" and data['mention_count'] > 0):
-            output.append(
-                f"🔸 **{src_name}**（{data['type']}）被提及了 {data['mention_count']} 次，情感比率 {float(data['sentiment_score']/data['mention_count'])}，其中："
-            )
-        elif (data['mention_count'] > 0):
-            output.append(
-                f"🔸 **{src_name}**（{data['type']}）被提及了 {data['mention_count']} 次，情感比率 {float(data['sentiment_score']/data['mention_count'])}，其中："
-            )
+        graph[src_id]["facets"][tgt_id]["avg_sentiment_score"] = tgt.get(
+            "avg_sentiment_score", 0.0)
+        graph[src_id]["facets"][tgt_id]["brand_stats"] = tgt.get(
+            "brand_stats", [])
+        graph[src_id]["facets"][tgt_id]["type"] = tgt.get(
+            "entity_type", [])
+        graph[src_id]["facets"][tgt_id]["opinions"] = tgt.get(
+            "opinions", [])
+    # 轉換為可序列化的列表
+    summary: List[Dict[str, Any]] = []
+    for src_id, data in graph.items():
+        if data["mention_count"] <= 0:
+            continue
+        aspects_or_objects_key = "objects" if data["type"] == "構面" else "aspects"
+        if data["type"] == "構面":
+            # 構建來源節點條目
+            entry: Dict[str, Any] = {
+                "entity_id":         src_id,
+                "type":              data["type"],
+                "mention_count":     data["mention_count"],
+                "avg_sentiment_score":   data["avg_sentiment_score"],
+                "opinions":         data["opinions"],
+                # "brand_stats":       remove_source_id(data["brand_stats"]),
+                aspects_or_objects_key:            []
+            }
         else:
-            print(f"1992 就是{src_name}的提及次數 = {data['mention_count']}")
-        for facet_name, f in data["facets"].items():
-            # ⬇️ 如果 facet_name 是像「裕珍馨_商品」，就去掉「裕珍馨_」
-            if facet_name.startswith(src_name + "_"):
-                display_facet_name = facet_name[len(src_name) + 1:]
-            else:
-                display_facet_name = facet_name
-            if (f['mention_count'] > 0):
-                output.append(
-                    f"  - {display_facet_name}（{f['mention_count']} 次 / {float(f['sentiment_score']/f['mention_count'])}）"
-                )
-        output.append("")  # 空行區隔
+            # 構建來源節點條目
+            entry: Dict[str, Any] = {
+                "entity_id":         src_id,
+                "type":              data["type"],
+                "mention_count":     data["mention_count"],
+                "avg_sentiment_score":   data["avg_sentiment_score"],
+                # "brand_stats":       remove_source_id(data["brand_stats"]),
+                aspects_or_objects_key:            [],
+            }
 
-    return "\n".join(output)
+        # 為每個構面生成條目
+        for tgt_id, f in data["facets"].items():
+            if f["mention_count"] <= 0:
+                continue
+            if data["type"] == "構面":
+                facet_entry = {
+                    "name":            tgt_id,
+                    "type":   f["type"],
+                    "mention_count":   f["mention_count"],
+                    "avg_sentiment_score": f["avg_sentiment_score"],
+                    "opinions":       f["opinions"],
+                    "brand_stats":     remove_source_id(f["brand_stats"])
+                }
+            else:
+                facet_entry = {
+                    "name":            tgt_id,
+                    "type":   f["type"],
+                    "mention_count":   f["mention_count"],
+                    "avg_sentiment_score": f["avg_sentiment_score"],
+                    "brand_stats":     remove_source_id(f["brand_stats"])
+                }
+            entry[aspects_or_objects_key].append(facet_entry)
+        summary.append(entry)
+
+    # 回傳格式化後的 JSON 字串
+    return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
 async def _find_most_related_text_unit_from_entities(
@@ -2208,7 +2258,6 @@ async def _find_most_related_edges_from_entities(
             if sorted_edge not in seen:
                 seen.add(sorted_edge)
                 all_edges.append(sorted_edge)
-
     # 🟡 同步查詢邊、source節點、target節點
     all_edges_pack, src_nodes, tgt_nodes, node_degree = await asyncio.gather(
         asyncio.gather(*[knowledge_graph_inst.get_edge(e[0], e[1])
@@ -2434,11 +2483,17 @@ async def _find_incoming_chunk_texts_from_nodes(
         if not src_node:
             continue
 
-        # ✅ 改這裡：從 source_ids 取出多筆 chunk
-        if "source_ids" in src_node and isinstance(src_node["source_ids"], list):
-            for chunk_id in src_node["source_ids"]:
-                edge_datas.append(
-                    {"entity_name": entity_id, "source_id": chunk_id})
+        # 新增：建立 source_id 到 entity_name、brand 的映射
+        if "brand_stats" in src_node:
+            for brand_info in src_node["brand_stats"]:
+                brand_name = brand_info.get("brand")
+                source_ids = brand_info.get("source_ids", [])
+                for chunk_id in source_ids:
+                    edge_datas.append({
+                        "entity_name": entity_id,
+                        "brand_name": brand_name,
+                        "source_id": chunk_id
+                    })
 
     return await _find_related_text_unit_from_relationships(
         edge_datas=edge_datas,
@@ -2460,24 +2515,29 @@ async def _find_related_text_unit_from_relationships(
     ]
     all_text_units_lookup = {}
 
-    # 🔧 建立一個 chunk_id → entity_name 的對應表
-    chunk_to_entity = {}
+    # 🔧 建立一個 source_id → (entity_name, brand_name) 的對應表
+    chunk_to_info = {}
     for dp in edge_datas:
         entity_name = dp["entity_name"]
+        brand_name = dp.get("brand_name", None)
         chunk_ids = split_string_by_multi_markers(
             dp["source_id"], [GRAPH_FIELD_SEP])
         for c_id in chunk_ids:
-            chunk_to_entity[c_id] = entity_name
+            chunk_to_info[c_id] = {
+                "entity_name": entity_name,
+                "brand_name": brand_name
+            }
 
     async def fetch_chunk_data(c_id, index):
         if c_id not in all_text_units_lookup:
             chunk_data = await text_chunks_db.get_by_id(c_id)
-            # Only store valid data
             if chunk_data is not None and "content" in chunk_data:
+                info = chunk_to_info.get(c_id, {})
                 all_text_units_lookup[c_id] = {
                     "data": chunk_data,
                     "order": index,
-                    "entity_name": chunk_to_entity.get(c_id, None),
+                    "entity_name": info.get("entity_name"),
+                    "brand_name": info.get("brand_name")
                 }
 
     tasks = []
@@ -2494,7 +2554,6 @@ async def _find_related_text_unit_from_relationships(
     all_text_units = [{"id": k, **v} for k, v in all_text_units_lookup.items()]
     all_text_units = sorted(all_text_units, key=lambda x: x["order"])
 
-    # Ensure all text chunks have content
     valid_text_units = [
         t for t in all_text_units if t["data"] is not None and "content" in t["data"]
     ]
@@ -2509,18 +2568,16 @@ async def _find_related_text_unit_from_relationships(
         max_token_size=query_param.max_token_for_text_unit,
     )
 
-    logger.debug(
-        f"Truncate chunks from {len(valid_text_units)} to {len(truncated_text_units)} (max tokens:{query_param.max_token_for_text_unit})"
-    )
-
+    # 每一個 text chunk 回傳時，加上 entity_name 和 brand_name
     all_text_units: list[TextChunkSchema] = [
         {
             **t["data"],
-            "entity_name": t.get("entity_name")  # 🆕 最後加進去
+            "entity_name": t.get("entity_name"),
+            "brand_name": t.get("brand_name")
         }
         for t in truncated_text_units
     ]
-    print(all_text_units)
+    # print(all_text_units)
 
     return all_text_units
 

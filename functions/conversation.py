@@ -10,10 +10,9 @@ import nest_asyncio
 import numpy as np
 
 nest_asyncio.apply()
-WORKING_DIR = "./0414"
-os.environ["NEO4J_URI"] = "bolt://localhost:7687"
-os.environ["NEO4J_USERNAME"] = "753463"
-os.environ["NEO4J_PASSWORD"] = "REDACTED"
+WORKING_DIR = "./0519"
+# Neo4j 連線資訊請在環境變數或 .env 中設定：NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD
+os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
 
 
 if not os.path.exists(WORKING_DIR):
@@ -97,7 +96,7 @@ def main():
                 mode="local_plus",  # 你可改為 local / global / mix
                 conversation_history=conv.get_history(),
                 history_turns=5,
-                top_k=20
+                top_k=30
             ),
         )
 

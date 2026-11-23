@@ -1118,7 +1118,6 @@ class LightRAG:
                 chunk_to_source_map[source_id] = chunk_id
                 update_storage = True
 
-            print(chunk_to_source_map)
             if all_chunks_data:
                 await asyncio.gather(
                     self.chunks_vdb.upsert(all_chunks_data),
@@ -1146,16 +1145,12 @@ class LightRAG:
                     logger.warning(
                         f"Entity '{entity_name}' has an UNKNOWN source_id. Please check the source mapping."
                     )
-                existing_mention_count = await self.chunk_entity_relation_graph.get_existing_mention_count(entity_name, entity_type)
-                existing_sentiment_score = await self.chunk_entity_relation_graph.get_existing_sentiment_score(entity_name, entity_type)
                 # Prepare node data
                 node_data: dict[str, str] = {
                     "entity_id": entity_name,
                     "entity_type": entity_type,
                     "description": description,
-                    "source_id": source_id,
-                    "mention_count": mention_count + existing_mention_count,
-                    "sentiment_score": sentiment_score + existing_sentiment_score
+                    "source_id": source_id
                 }
                 # Insert node data into the knowledge graph
                 await self.chunk_entity_relation_graph.upsert_node(
@@ -1171,10 +1166,12 @@ class LightRAG:
                 src_id = relationship_data["src_id"]
                 tgt_id = relationship_data["tgt_id"]
                 description = relationship_data["description"]
+                opinion = relationship_data.get("opinion", "UNKNOWN")
                 keywords = relationship_data["keywords"]
                 weight = relationship_data.get("weight", 1.0)
                 source_chunk_id = relationship_data.get("source_id", "UNKNOWN")
                 source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
+                brand = relationship_data.get("brand", "UNKNOWN")
                 date = relationship_data.get("date", "UNKNOWN")
                 sentiment_score = relationship_data.get(
                     "sentiment_score", "UNKNOWN")
@@ -1207,8 +1204,10 @@ class LightRAG:
                     edge_data={
                         "weight": weight,
                         "description": description,
+                        "opinion": opinion,
                         "keywords": keywords,
                         "source_id": source_id,
+                        "brand": brand,
                         "date": date,
                         "sentiment_score": sentiment_score
                     },
@@ -1217,8 +1216,10 @@ class LightRAG:
                     "src_id": src_id,
                     "tgt_id": tgt_id,
                     "description": description,
+                    "opinion": opinion,
                     "keywords": keywords,
                     "source_id": source_id,
+                    "brand": brand,
                     "date": date,
                     "sentiment_score": sentiment_score,
                     "weight": weight,

@@ -11,8 +11,7 @@ from sentence_transformers import SentenceTransformer
 
 WORKING_DIR = "./0330"
 os.environ["NEO4J_URI"] = "bolt://localhost:7687"
-os.environ["NEO4J_USERNAME"] = "753463"
-os.environ["NEO4J_PASSWORD"] = "REDACTED"
+# NEO4J_USERNAME / NEO4J_PASSWORD 請在環境變數或 .env 中設定
 
 if not os.path.exists(WORKING_DIR):
     os.mkdir(WORKING_DIR)
